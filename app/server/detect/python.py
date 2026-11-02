@@ -1,11 +1,8 @@
-"""The Python detectors: uv or pip, one of the known entrypoints, and the settings scan."""
+"""The Python detectors: uv or pip and one of the known entrypoints."""
 
-import ast
-import os
 import re
-from pathlib import Path
 
-from app.server.detect.base import SET_BY_YARD, Plan, Repo, Setting, pin, plan_template
+from app.server.detect.base import Plan, Repo, pin, plan_template
 from app.shared import YardError
 
 LANGUAGE = "python"
@@ -16,7 +13,6 @@ _DEFAULT = "3.14"
 
 _REQUIRES_PY = re.compile(r">=\s*3\.(\d+)")
 _DOT_VERSION = re.compile(r"^3\.(\d+)")
-_SKIP_DIRS = {"tests", "test", "node_modules", "__pycache__", "venv"}
 
 
 def detect(repo: Repo, name: str) -> Plan | None:
@@ -110,64 +106,3 @@ def _version_error(ask: str) -> YardError:
         f"Yard's python templates cover {', '.join(VERSIONS)}; this repo asks {ask}",
         help_text="Add a Containerfile.",
     )
-
-
-def _files(repo: Repo):
-    count = 0
-    for root, dirs, names in os.walk(repo.root):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
-        for filename in names:
-            if filename.endswith(".py"):
-                path = Path(root) / filename
-                count += 1
-                if count > 2000:
-                    return
-                if path.stat().st_size <= 1024 * 1024:
-                    yield path
-
-
-def _call_name(node) -> str:
-    """The dotted path of a call or attribute target: os.environ.get -> 'os.environ.get'."""
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
-
-
-def settings(repo: Repo) -> list[Setting]:
-    """Env keys the code reads: os.environ[...] is required, .get/.getenv optional."""
-    found: dict[str, Setting] = {}
-    for path in _files(repo):
-        try:
-            tree = ast.parse(path.read_text())
-        except SyntaxError, ValueError:
-            continue
-        rel = path.relative_to(repo.root)
-        for node in ast.walk(tree):
-            key, required = "", False
-            if isinstance(node, ast.Subscript):
-                target = _call_name(node.value)
-                if (
-                    target in ("os.environ", "environ")
-                    and isinstance(node.slice, ast.Constant)
-                    and isinstance(node.slice.value, str)
-                ):
-                    key, required = node.slice.value, True
-            elif (
-                isinstance(node, ast.Call)
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-            ):
-                if _call_name(node.func) in ("os.environ.get", "environ.get", "os.getenv", "getenv"):
-                    key = node.args[0].value
-            if not key or key in SET_BY_YARD:
-                continue
-            where = f"{rel}:{getattr(node, 'lineno', 0)}"
-            current = found.get(key)
-            if current is None or (required and not current.required):
-                found[key] = Setting(key, required, where)
-    return sorted(found.values(), key=lambda s: s.key)

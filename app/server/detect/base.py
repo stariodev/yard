@@ -1,4 +1,4 @@
-"""The shared spine of the detectors: the checkout handle, the plan, the settings row."""
+"""The shared spine of the detectors: the checkout handle and the plan."""
 
 import hashlib
 import json
@@ -10,16 +10,6 @@ _HERE = Path(__file__).resolve().parent
 _TEMPLATES = _HERE / "templates"
 BASES: dict[str, str] = json.loads((_HERE / "bases.json").read_text())
 DOWNLOADS: dict[str, dict] = json.loads((_HERE / "downloads.json").read_text())
-
-SET_BY_YARD = {
-    "PROJECT_NAME",
-    "PROJECT_DATA_DIR",
-    "SHA",
-    "PORT",
-    "STARIO_HOST",
-    "STARIO_PORT",
-    "STARIO_TRACER",
-}
 
 
 class Repo:
@@ -55,15 +45,6 @@ class Plan:
     reason: str  # human text: "found compose.yml", "stario: pyproject.toml declares stario"
     generated: str = ""  # the rendered Containerfile when answer is "yard:<name>"
     template: str = ""  # first 8 hex of the rendered text's sha256
-
-
-@dataclass(frozen=True, slots=True)
-class Setting:
-    """One env key the app's code reads."""
-
-    key: str
-    required: bool
-    where: str  # "app/config.py:37"
 
 
 def pin(ref: str) -> str:

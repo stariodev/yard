@@ -5,9 +5,8 @@ A detector is one module in this package for one language or framework. It expos
 - LANGUAGE: the language it is an opinionated kind of (several detectors may share one).
 - MARKERS: repo files that prove the language is present (first match names the language).
 - detect(repo, name) -> Plan | None: None means "not mine"; YardError means "mine but broken".
-- settings(repo) -> list[Setting], optional: the env keys the code reads.
 
-A detector imports Repo, Plan, Setting, SET_BY_YARD, pin, and plan_template from detect.base.
+A detector imports Repo, Plan, pin, and plan_template from detect.base.
 A generated Containerfile lives in templates/ next to this file and renders through render.
 Every FROM and COPY --from in a template is pinned to an index digest in bases.json.
 A detector must refuse (YardError or None) rather than guess an install or entrypoint.
@@ -16,21 +15,18 @@ A PR adding a detector adds the module, its template, a bases.json pin, an entry
 DETECTORS (specific before generic), and tests under tests/server/.
 """
 
-import logging
 import re
 from pathlib import Path
 
 from app.server import git
 from app.server.compose import COMPOSE_NAMES, DOCKERFILES
 from app.server.detect import go, http_nu, node, python, stario
-from app.server.detect.base import Plan, Repo, Setting, _join
+from app.server.detect.base import Plan, Repo, _join
 from app.shared import YardError
-
-log = logging.getLogger("yard")
 
 DETECTORS = (stario, python, go, node, http_nu)
 
-__all__ = ["DETECTORS", "Plan", "Repo", "Setting", "classify", "language", "plan_for", "resolve", "settings"]
+__all__ = ["DETECTORS", "Plan", "Repo", "classify", "language", "plan_for", "resolve"]
 
 _SERVICES = re.compile(r"^services:\s*(#.*)?$", re.M)
 _INSTRUCTION = re.compile(r"^(FROM|ARG)\s", re.I)
@@ -141,19 +137,3 @@ def language(checkout: Path, name: str = "") -> Plan:
         if plan is not None:
             return plan
     raise YardError(502, "detect", f"found {found[lang][0]} but no detector claims it")
-
-
-def settings(checkout: Path) -> list[Setting]:
-    """The env keys the checkout's code reads, when exactly one language owns it. Never raises."""
-    try:
-        repo = Repo(checkout)
-        found = _languages(repo)
-        if len(found) != 1:
-            return []
-        lang = next(iter(found))
-        for mod in DETECTORS:
-            if mod.LANGUAGE == lang and hasattr(mod, "settings"):
-                return mod.settings(repo)
-    except Exception as exc:
-        log.warning("detect.settings %s: %s", checkout, exc)
-    return []
