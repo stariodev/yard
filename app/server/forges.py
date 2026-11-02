@@ -69,24 +69,9 @@ class Forge:
 
     @property
     def installations(self) -> list[dict]:
-        """Every installation of the app: [{"id", "account", "selection"}].
-
-        A legacy state with installation_id at the top level reads as one
-        installation; the next save writes the list and drops the old keys.
-        """
-        state = self._state()
-        found = state.get("installations")
-        if isinstance(found, list):
-            return [entry for entry in found if isinstance(entry, dict)]
-        if state.get("installation_id"):
-            return [
-                {
-                    "id": str(state.get("installation_id") or ""),
-                    "account": str(state.get("account") or ""),
-                    "selection": str(state.get("selection") or ""),
-                }
-            ]
-        return []
+        """Every installation of the app: [{"id", "account", "selection", "type"}]."""
+        found = self._state().get("installations")
+        return [entry for entry in found if isinstance(entry, dict)] if isinstance(found, list) else []
 
     def save(self, drop: Iterable[str] = (), **fields: str | list) -> None:
         """Merge fields into state.json. The write is atomic."""
@@ -120,17 +105,9 @@ class Forge:
         return {"name": info.get(self.name_field) or "", "events": info.get("events") or []}
 
     def installation_for(self, repo: str) -> dict | None:
-        """The installation whose account owns the repo's owner, case-insensitively.
-
-        An entry with no account is a legacy install from before accounts were
-        saved; it owns every repo so nothing regresses.
-        """
-        owner = urlsplit(repo).path.strip("/").split("/", 1)[0]
-        for installation in self.installations:
-            account = str(installation.get("account") or "")
-            if not account or account.lower() == owner.lower():
-                return installation
-        return None
+        """The installation whose account owns the repo's owner, case-insensitively."""
+        owner = urlsplit(repo).path.strip("/").split("/", 1)[0].lower()
+        return next((entry for entry in self.installations if str(entry.get("account") or "").lower() == owner), None)
 
     def _installation_items(self, body: object) -> list[dict]:
         """The installations in a GET /app/installations answer. Subclasses read their own shape."""
@@ -212,7 +189,7 @@ class Forge:
         """Every installation of the app, saved to state.json. Returns the saved entries."""
         body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())
         installations = [self._installation_row(item) for item in self._installation_items(body)]
-        self.save(installations=installations, drop=("installation_id", "account", "selection"))
+        self.save(installations=installations)
         return installations
 
     async def token(self, repo: str = "") -> str:
@@ -417,7 +394,7 @@ class Origin(Forge):
     async def connect(self, app_id: str) -> dict:
         """Save the app id only when GET /app answers for it and the existing key."""
         info = await self.get_app_for(app_id)
-        self.save(app_id=app_id, drop=("installations", "installation_id", "account", "selection"))
+        self.save(app_id=app_id, drop=("installations",))
         self._tokens = {}
         return info
 
@@ -562,7 +539,7 @@ class GitHub(Forge):
             app_id=app_id,
             slug=str(info.get("slug") or ""),
             webhook_secret=webhook_secret,
-            drop=("installations", "installation_id", "account", "selection"),
+            drop=("installations",),
         )
         self._tokens = {}
         return info

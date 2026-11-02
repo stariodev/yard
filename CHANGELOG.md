@@ -14,6 +14,9 @@
 - `POST /api/v1/apps/{name}/deploy` joins a running deploy, also after a restart: the job streams the deploy container's log from its first line, and its status comes from the exit code. `yard app deploy` follows it as before.
 - A URL app deploy prunes the old compose copies when it starts. It keeps the running copy and the new one.
 - The deploy job reads the exposed port when the client asks for the job after an ok deploy. The `SHA` env of the Yard container is no longer read.
+- Breaking: upgrade a 0.10 host through 0.11 first. The 0.11 move from the bind routes is gone: a boot with no site file no longer writes default sites from the routes Caddy resumed, and the `caddy.import` event is gone.
+- Breaking: a forge `state.json` from before 0.10 with `installation_id` at the top level no longer reads as one installation, and an installation with no account no longer owns every repo. `yard forge setup` writes the `installations` list; a host that ran it on 0.10 or later has it.
+- `GET /api/v1/status` and `yard status` ask Caddy about each site file once, and again only when the file changes. Before, each status call sent one Caddy `/adapt` request for each app.
 
 ## 0.11.0
 

@@ -191,7 +191,7 @@ async def test_find_installations_saves_every_account(api, tmp_path):
 async def test_find_installations_an_empty_answer_saves_an_empty_list(api, tmp_path):
     origin, box = api
     box.installations = []
-    origin.save(app_id="app_1", installation_id="ins_1", account="org")
+    origin.save(app_id="app_1", installations=[{"id": "ins_1", "account": "org", "selection": "all"}])
     assert await origin.find_installations() == []
     state = json.loads((tmp_path / "origin" / "state.json").read_text())
     assert state == {"app_id": "app_1", "installations": []}
@@ -562,25 +562,9 @@ async def test_github_url():
     assert clone_url("https://github.com/org/heldso") == "https://github.com/org/heldso.git"
 
 
-def test_no_saved_account_matches_every_owner(tmp_path):
-    """A legacy install with no account keeps owning every repo."""
-    github = GitHub(tmp_path / "github")
-    github.save(installation_id="101")
-    assert github.installation_for("https://github.com/Bobowski/yard")
-
-
-def test_a_legacy_state_reads_as_one_installation(tmp_path):
-    github = GitHub(tmp_path / "github")
-    github.save(app_id="42", installation_id="101", account="Bobowski")
-    assert github.installations == [{"id": "101", "account": "Bobowski", "selection": ""}]
-    assert github.installation_for("https://github.com/Bobowski/x")
-    assert github.installation_for("https://github.com/bobowski/x")
-    assert not github.installation_for("https://github.com/stariodev/x")
-
-
 def test_installation_for_matches_the_url_owner_case_insensitively(tmp_path):
     github = GitHub(tmp_path / "github")
-    github.save(installation_id="101", account="org")
+    github.save(installations=[{"id": "101", "account": "org", "selection": "all"}])
     assert github.installation_for("https://github.com/org/yard")
     assert github.installation_for("https://github.com/ORG/yard.git")
     assert not github.installation_for("https://github.com/Bobowski/yard")
