@@ -660,26 +660,24 @@ async def test_forge_origin_key_and_put(yard, monkeypatch):
     assert body["app"]["name"] == "yard"
 
 
-async def test_forges_find_the_installation_on_read(yard, monkeypatch):
+async def test_forge_installations_asks_the_forge_and_get_does_not(yard, monkeypatch):
     client, token, root = yard
     github = next(forge for forge in _yard_forges(root) if forge.name == "github")
     github.save(app_id="42")
-
-    async def missing(self):
-        return []
-
-    monkeypatch.setattr(GitHub, "find_installations", missing)
-    rows = (await client.get("/api/v1/forges", headers=auth(token))).json()
-    found = next(row for row in rows if row["name"] == "github")
-    assert found["installations"] == []
+    asked: list[str] = []
 
     async def found_one(self):
+        asked.append(self.name)
         self.save(installations=[{"id": "101", "account": "org", "selection": "all"}])
         return [{"id": "101", "account": "org", "selection": "all"}]
 
     monkeypatch.setattr(GitHub, "find_installations", found_one)
     rows = (await client.get("/api/v1/forges", headers=auth(token))).json()
-    found = next(row for row in rows if row["name"] == "github")
+    assert next(row for row in rows if row["name"] == "github")["installations"] == []
+    assert asked == []
+
+    found = (await client.post("/api/v1/forges/github/installations", headers=auth(token))).json()
+    assert asked == ["github"]
     assert found["installations"] == [
         {
             "id": "101",
@@ -690,9 +688,11 @@ async def test_forges_find_the_installation_on_read(yard, monkeypatch):
     ]
     state = json.loads((root / "apps" / "yard" / "data" / "github" / "state.json").read_text())
     assert state["installations"] == [{"id": "101", "account": "org", "selection": "all"}]
+    res = await client.post("/api/v1/forges/nope/installations", headers=auth(token))
+    assert res.status_code == 404
 
 
-async def test_forges_swallow_installation_errors(yard, monkeypatch):
+async def test_forge_installations_reports_a_forge_error(yard, monkeypatch):
     client, token, root = yard
     github = next(forge for forge in _yard_forges(root) if forge.name == "github")
     github.save(app_id="42")
@@ -701,10 +701,9 @@ async def test_forges_swallow_installation_errors(yard, monkeypatch):
         raise YardError(502, "github", "github GET /app/installations: refused")
 
     monkeypatch.setattr(GitHub, "find_installations", broken)
-    res = await client.get("/api/v1/forges", headers=auth(token))
+    res = await client.post("/api/v1/forges/github/installations", headers=auth(token))
     assert res.status_code == 200
-    found = next(row for row in res.json() if row["name"] == "github")
-    assert found["error"] == "github GET /app/installations: refused"
+    assert res.json()["error"] == "github GET /app/installations: refused"
 
 
 async def test_installation_hook_keeps_every_account(yard, monkeypatch):

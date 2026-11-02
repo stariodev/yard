@@ -107,7 +107,7 @@ async def _forge_app(forge: Forge) -> tuple[bool, str]:
         body = await forge.get_app()
     except YardError as exc:
         return False, f"{exc}; check the app on {forge.host}"
-    name = body.get("displayName") or body.get("display_name") or body.get("name") or ""
+    name = body.get(forge.name_field) or ""
     return True, str(name) if name else "ok"
 
 

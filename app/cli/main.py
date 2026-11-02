@@ -1389,11 +1389,12 @@ def _forge_row(session: Client, name: str) -> dict:
 
 
 def _poll_installation(session: Client, name: str) -> None:
-    """Read the forge summary every three seconds until the installation lands. Ten minutes tops."""
+    """Ask the forge every three seconds until the installation lands. Ten minutes tops."""
     deadline = time.monotonic() + SETUP_LIMIT
     seen_error = ""
     while time.monotonic() < deadline:
-        forge = _forge_row(session, name)
+        found = _object(_api(session, "POST", f"/api/v1/forges/{name}/installations", None))
+        forge = found if isinstance(found, dict) else {}
         error = str(forge.get("error") or "")
         if error and error != seen_error:
             print(f"warning: {error}", file=sys.stderr)

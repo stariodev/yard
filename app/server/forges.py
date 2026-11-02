@@ -37,6 +37,12 @@ class Forge:
     api = ""
     # The repo_permission help text for a create; subclasses set it.
     create_help = ""
+    # The token answer's expiry field: Origin answers camelCase, GitHub snake_case.
+    expires_field = ""
+    # The headers that carry a webhook delivery id.
+    delivery_headers: tuple[str, ...] = ()
+    # The app's display name in a GET /app answer.
+    name_field = ""
 
     def __init__(self, dir: Path, api: str = "") -> None:
         self.dir = dir
@@ -100,13 +106,13 @@ class Forge:
                 return installation
         return None
 
-    def selection(self, installation: dict) -> str:
-        """all or selected. Subclasses read their own field."""
-        return ""
+    def _installation_items(self, body: object) -> list[dict]:
+        """The installations in a GET /app/installations answer. Subclasses read their own shape."""
+        raise NotImplementedError
 
-    def account_type(self, installation: dict) -> str:
-        """User or Organization on GitHub. Subclasses read their own field."""
-        return ""
+    def _installation_row(self, item: dict) -> dict:
+        """One saved installation: {"id", "account", "selection", "type"}. Subclasses read their own fields."""
+        raise NotImplementedError
 
     def settings_url(self, installation: dict) -> str:
         """The page where the owner changes the repo selection; "" when the forge has none."""
@@ -179,17 +185,7 @@ class Forge:
     async def find_installations(self) -> list[dict]:
         """Every installation of the app, saved to state.json. Returns the saved entries."""
         body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())
-        found = body.get("installations") if isinstance(body, dict) else body
-        installations = [
-            {
-                "id": str(item.get("id") or ""),
-                "account": _account(item),
-                "selection": self.selection(item),
-                "type": self.account_type(item),
-            }
-            for item in (found if isinstance(found, list) else [])
-            if isinstance(item, dict)
-        ]
+        installations = [self._installation_row(item) for item in self._installation_items(body)]
         self.save(installations=installations, drop=("installation_id", "account", "selection"))
         return installations
 
@@ -219,7 +215,7 @@ class Forge:
         token = str(data.get("token") or "")
         if not token:
             raise YardError(502, self.name, f"{self.name} returned no token")
-        moment = _parse_stamp(str(data.get("expiresAt") or data.get("expires_at") or ""))
+        moment = _parse_stamp(str(data.get(self.expires_field) or ""))
         self._tokens[installation] = (token, moment.timestamp() if moment else 0.0)
         return token
 
@@ -296,6 +292,9 @@ class Origin(Forge):
     name = "origin"
     host = "origin.cursor.com"
     api = "https://api.cursor.com/v1/origin"
+    expires_field = "expiresAt"
+    name_field = "displayName"
+    delivery_headers = ("x-origin-delivery", "x-delivery")
     create_help = (
         "Approve the namespace:repositories:create scope for the Yard Origin app:"
         " run yard forge setup origin, or open the install link with include_granted_scopes=true."
@@ -353,8 +352,18 @@ class Origin(Forge):
     def app_jwt(self) -> str:
         return self._jwt(self.app_id)
 
-    def selection(self, installation: dict) -> str:
-        return str(installation.get("repoSelectionMode") or installation.get("repo_selection_mode") or "")
+    def _installation_items(self, body: object) -> list[dict]:
+        found = body.get("installations") if isinstance(body, dict) else None
+        return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
+
+    def _installation_row(self, item: dict) -> dict:
+        target = item.get("target")
+        return {
+            "id": str(item.get("id") or ""),
+            "account": str(target.get("slug") or "") if isinstance(target, dict) else "",
+            "selection": str(item.get("repoSelectionMode") or ""),
+            "type": "",
+        }
 
     async def connect(self, app_id: str) -> dict:
         """Save the app id only when GET /app answers for it and the existing key."""
@@ -384,6 +393,9 @@ class GitHub(Forge):
     name = "github"
     host = "github.com"
     api = "https://api.github.com"
+    expires_field = "expires_at"
+    name_field = "name"
+    delivery_headers = ("x-github-delivery",)
     create_help = (
         "In the app's GitHub settings, set Repository creation to Read and write,"
         " then accept the new permission on the installation."
@@ -439,12 +451,18 @@ class GitHub(Forge):
             )
         return self._jwt(app_id, self._key())
 
-    def selection(self, installation: dict) -> str:
-        return str(installation.get("repository_selection") or "")
+    def _installation_items(self, body: object) -> list[dict]:
+        return [item for item in body if isinstance(item, dict)] if isinstance(body, list) else []
 
-    def account_type(self, installation: dict) -> str:
-        account = installation.get("account")
-        return str(account.get("type") or "") if isinstance(account, dict) else ""
+    def _installation_row(self, item: dict) -> dict:
+        account = item.get("account")
+        account = account if isinstance(account, dict) else {}
+        return {
+            "id": str(item.get("id") or ""),
+            "account": str(account.get("login") or ""),
+            "selection": str(item.get("repository_selection") or ""),
+            "type": str(account.get("type") or ""),
+        }
 
     def settings_url(self, installation: dict) -> str:
         ident, account = str(installation.get("id") or ""), str(installation.get("account") or "")
@@ -545,18 +563,7 @@ class GitHub(Forge):
         token = str(data.get("token") or "")
         if not token:
             raise YardError(502, self.name, f"{self.name} returned no token")
-        return token, str(data.get("expires_at") or "")
-
-
-def _account(installation: dict) -> str:
-    """GitHub answers account.login; Origin answers target.slug."""
-    account = installation.get("account")
-    if isinstance(account, dict) and account.get("login"):
-        return str(account["login"])
-    target = installation.get("target")
-    if isinstance(target, dict):
-        return str(target.get("slug") or "")
-    return ""
+        return token, str(data.get(self.expires_field) or "")
 
 
 def _b64(raw: bytes) -> str:
