@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.server.store import App, read_deployed
+from app.server.store import App, Deployed
 from app.shared import YardError, deploy_container, ensure_file, short_sha
 
 if TYPE_CHECKING:
@@ -89,9 +89,8 @@ def project(
     return Project(app.name, files, env)
 
 
-def saved_project(config: Config, app: App) -> Project | None:
-    """Rebuild the project for a purge from the deployed file; None when there is none."""
-    deployed = read_deployed(config, app.name)
+def saved_project(config: Config, app: App, deployed: Deployed | None) -> Project | None:
+    """Rebuild the project for a purge from the running plan; None when there is none."""
     if deployed is None or not deployed.revision:
         return None
     if deployed.kind == "image":
@@ -122,6 +121,7 @@ async def apply(
     on_line: Callable[[str], None] | None = None,
 ) -> tuple[int, str]:
     """Run the apply script as one Podman container. A non-zero exit is the deploy log, not an exception."""
+    await _remove_record(config, app)
     argv = _podman(config) + [
         "run",
         *_record_args(app, labels or {}),
@@ -146,6 +146,11 @@ async def apply(
 
 async def record_failure(config: Config, app: str, labels: dict[str, str], lines: list[str]) -> None:
     """A deploy that failed before the apply: a deploy container that prints its lines and exits 1."""
+    try:
+        await _remove_record(config, app)
+    except Exception as exc:
+        log.warning("deploy record %s: %s", app, exc)
+        return
     argv = _podman(config) + [
         "run",
         *_record_args(app, labels),
@@ -163,10 +168,21 @@ async def record_failure(config: Config, app: str, labels: dict[str, str], lines
         log.warning("deploy record %s: %s", app, exc)
 
 
+async def _remove_record(config: Config, app: str) -> None:
+    """Remove the last deploy container. Without -f, Podman refuses a running one: a running deploy
+    container is the deploy lock, and the `run` after this then fails on the name."""
+    await _run(_podman(config) + ["rm", deploy_container(app)], _process_env(config))
+
+
+async def follow(config: Config, app: str, on_line: Callable[[str], None]) -> None:
+    """Stream the log of the deploy container from its first line until it stops."""
+    await _run(_podman(config) + ["logs", "-f", deploy_container(app)], _process_env(config), on_line=on_line)
+
+
 def _record_args(app: str, labels: dict[str, str]) -> list[str]:
-    """The fixed name and the labels. The name makes `podman logs deploy-<name>` the last deploy;
-    --replace drops the one before. `status.deploy_record` reads the labels back."""
-    args = ["--replace", "--name", deploy_container(app)]
+    """The fixed name and the labels. The name makes `podman logs deploy-<name>` the last deploy.
+    `status.deploy_record` reads the labels back."""
+    args = ["--name", deploy_container(app)]
     for key in sorted(labels):
         args += ["--label", f"yard.{key}={labels[key]}"]
     return args

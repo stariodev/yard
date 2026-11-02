@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from app.server import journal, podman, sites
 from app.server.podman import Container, Sample
-from app.server.store import App, Config, Deployed, read_deployed
+from app.server.store import App, Config, Deployed
 from app.server.yard import Tip
-from app.shared import YardError, app_container, deploy_container, image_sha, stamp
+from app.shared import YardError, app_container, deploy_container, image_sha, parse_runs, stamp
 
 if TYPE_CHECKING:
     from app.server.yard import Yard
@@ -72,6 +72,7 @@ class Page:
     hosts: list[str]
     deploy: dict[str, Any] | None
     log: str
+    deployed: Deployed | None = None
     template_moved: bool = False
 
 
@@ -103,7 +104,7 @@ async def report(yard: Yard, running_only: bool = False) -> Report:
     for app in apps:
         items = [item for item in grouped.pop(app.name, []) if item.role == "app"]
         tip = yard.tips.get(app.name)
-        deployed = read_deployed(config, app.name)
+        deployed = running_plan(app, listed)
         note = deploy_record(listed, app.name)
         hosts = await sites.list_hosts(yard, app.name)
         rows += _app_rows(config, app, items, samples, tip, deployed, note, hosts, crashes, running_only)
@@ -140,6 +141,76 @@ async def _crashes(yard: Yard, listed: dict[str, Container]) -> dict[str, tuple[
         return podman.parse_states(await yard.podman.run("inspect", *down))
     except YardError:
         return {}
+
+
+async def list_containers(yard: Yard) -> dict[str, Container]:
+    """Every container, stopped ones too; empty when Podman does not answer."""
+    try:
+        return podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    except YardError:
+        return {}
+
+
+async def get_plan(yard: Yard, app: App) -> Deployed | None:
+    """What the app runs now. One `podman ps` call."""
+    return running_plan(app, await list_containers(yard))
+
+
+def running_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
+    """What the app runs now, read from its deploy container. None before the first good deploy.
+
+    Exit 0 means the new plan runs. Any other end, or a deploy that still runs,
+    means the plan before it runs. The labels hold both, so a Yard restart in the
+    middle of a deploy loses nothing.
+    """
+    item = listed.get(deploy_container(app.name))
+    labels = item.labels if item else {}
+    if item is None or not labels.get("sha"):
+        # A host from before the deploy labels: the image of the app container.
+        return _image_plan(app, listed)
+    if not item.running and item.exit_code == 0:
+        plan = _labels_plan(labels, "")
+        if not plan.kind:
+            # A 0.11.0 record names the sha and the image, not the plan.
+            image = _image_plan(app, {app_container(app.name): Container(image=labels.get("image", ""))}) or Deployed()
+            plan.runs, plan.kind, plan.template = image.runs, image.kind, image.template
+        return plan
+    before = _labels_plan(labels, "before.")
+    return before if before.revision else _image_plan(app, listed)
+
+
+def last_try(listed: dict[str, Container], name: str) -> tuple[str, str]:
+    """The (revision, template) the last deploy tried, whatever its end."""
+    item = listed.get(deploy_container(name))
+    labels = item.labels if item else {}
+    return labels.get("sha", ""), labels.get("template", "")
+
+
+def _labels_plan(labels: dict[str, str], prefix: str) -> Deployed:
+    return Deployed(
+        revision=labels.get(f"{prefix}revision" if prefix else "sha", ""),
+        runs=labels.get(f"{prefix}runs", ""),
+        kind=labels.get(f"{prefix}kind", ""),
+        reason=labels.get(f"{prefix}reason", ""),
+        template=labels.get(f"{prefix}template", ""),
+    )
+
+
+def _image_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
+    """The plan the app container's image names: `localhost/<name>:<sha12>-<tpl8>` for a repo app,
+    `<ref>@sha256:...` for an image app. A URL app's image does not name its file: None."""
+    item = listed.get(app_container(app.name))
+    if item is None or not item.image:
+        return None
+    kind, _value = parse_runs(app.runs)
+    if not app.repo and kind == "image":
+        _ref, at, digest = item.image.partition("@")
+        return Deployed(revision=digest, runs=app.runs, kind="image") if at else None
+    if not app.repo or not item.image.startswith(f"localhost/{app.name}:"):
+        return None
+    revision = image_sha(item.image)
+    tag = item.image.rpartition(":")[2]
+    return Deployed(revision=revision, template=tag[len(revision) + 1 :])
 
 
 def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | None:
@@ -225,7 +296,7 @@ async def app_report(yard: Yard, name: str) -> Page:
     except YardError:
         samples = {}
     tip = yard.tips.get(app.name)
-    deployed = read_deployed(config, name)
+    deployed = running_plan(app, listed)
     items = [item for item in listed.values() if item.app == name and item.role == "app"]
     hosts = await sites.list_hosts(yard, app.name)
     note = deploy_record(listed, name)
@@ -243,6 +314,7 @@ async def app_report(yard: Yard, name: str) -> Page:
         hosts=hosts,
         deploy=note,
         log=page_log,
+        deployed=deployed,
         template_moved=any(row.template_moved for row in rows),
     )
 

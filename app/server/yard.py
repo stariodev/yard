@@ -50,7 +50,6 @@ class Tip:
     revision: str = ""
     template: str = ""
     error: str = ""
-    tried: tuple[str, str] = ("", "")
 
 
 class Yard:

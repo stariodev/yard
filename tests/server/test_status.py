@@ -7,7 +7,7 @@ import pytest
 
 from app.server import status
 from app.server.podman import Podman
-from app.server.store import Config, Store
+from app.server.store import App, Config, Deployed, Store
 from app.server.yard import Yard
 from tests.server.conftest import FakeCaddy
 
@@ -189,16 +189,15 @@ def test_two_hosts_stay_on_the_app_row(tmp_path: Path, monkeypatch: pytest.Monke
     assert rows["heldso-worker"]["hosts"] == []
 
 
-def test_url_row_shows_the_deployed_revision(tmp_path):
-    """A URL app's container runs the compose's image; the rev is the deployed file."""
+def test_url_row_shows_the_record_revision(tmp_path):
+    """A URL app's container runs the compose's image; the rev is the deploy record's sha."""
     from app.server.podman import Container
-    from app.server.store import Deployed, Store, write_deployed
     from app.server.yard import Tip
 
-    store = Store.open(tmp_path)
-    app = store.create_app("umami", "", runs="https://example.com/umami.yml")
+    app = Store.open(tmp_path).create_app("umami", "", runs="https://example.com/umami.yml")
     revision = "sha256:" + "b" * 64
-    config = __import__("app.server.store", fromlist=["Config"]).Config(
+    plan = status.running_plan(app, _listed(_deploy("umami", revision, runs=app.runs, kind="compose")))
+    config = Config(
         root=tmp_path,
         podman_sock="",
         podman_bin="",
@@ -209,19 +208,66 @@ def test_url_row_shows_the_deployed_revision(tmp_path):
         journalctl_bin="",
         journal_socket=tmp_path / "s.sock",
     )
-    write_deployed(config, "umami", Deployed(revision=revision, runs=app.runs, kind="compose"))
     item = Container(name="umami-app-1", image="postgres:17", app="umami", running=True, state="running")
-    row = status._row(
-        config, item, app, None, Tip(revision="sha256:" + "c" * 64), read_dep(config, "umami"), None, [], {}
-    )
+    row = status._row(config, item, app, None, Tip(revision="sha256:" + "c" * 64), plan, None, [], {})
     assert row.sha == revision
     assert row.tip == "sha256:" + "c" * 64
 
 
-def read_dep(config, name):
-    from app.server.store import read_deployed
+def _deploy(name: str, sha: str, *, state: str = "exited", code: int = 0, **labels: str) -> dict:
+    """A deploy container. A `before_runs` keyword is the `yard.before.runs` label."""
+    given = {"yard.sha": sha, **{f"yard.{key.replace('_', '.')}": value for key, value in labels.items()}}
+    return {"Names": [f"deploy-{name}"], "State": state, "ExitCode": code, "Labels": given}
 
-    return read_deployed(config, name)
+
+def _app_box(name: str, image: str) -> dict:
+    labels = {"com.docker.compose.project": name, "com.docker.compose.service": "app"}
+    return {"Names": [f"{name}-app-1"], "State": "running", "Image": image, "Labels": labels}
+
+
+def _listed(*rows: dict):
+    from app.server.podman import parse_ps
+
+    return parse_ps(json.dumps(list(rows)))
+
+
+HELDSO = App("heldso", "https://github.com/org/heldso", "main", "push", "t", "")
+NEW = {"runs": "yard:python-uv", "kind": "containerfile", "template": "3f9a1c2e"}
+BEFORE = {"before_revision": "old", "before_runs": "Containerfile", "before_kind": "containerfile"}
+
+
+@pytest.mark.parametrize(
+    ("state", "code", "revision"),
+    [("exited", 0, "new"), ("exited", 3, "old"), ("exited", 1, "old"), ("running", 0, "old")],
+)
+def test_running_plan_is_the_new_plan_only_on_exit_0(state, code, revision):
+    plan = status.running_plan(HELDSO, _listed(_deploy("heldso", "new", state=state, code=code, **NEW, **BEFORE)))
+    if revision == "new":
+        assert plan == Deployed(revision="new", runs="yard:python-uv", kind="containerfile", template="3f9a1c2e")
+    else:
+        assert plan == Deployed(revision="old", runs="Containerfile", kind="containerfile")
+
+
+def test_running_plan_falls_back_to_the_app_image():
+    """A host from before the labels: the app container's image names the sha and the template."""
+    listed = _listed(_app_box("heldso", "localhost/heldso:0123456789ab-3f9a1c2e"))
+    assert status.running_plan(HELDSO, listed) == Deployed(revision="0123456789ab", template="3f9a1c2e")
+    db = App("db", "", "main", "push", "t", "postgres:17")
+    digest = "sha256:" + "d" * 64
+    listed = _listed(_app_box("db", f"docker.io/library/postgres:17@{digest}"))
+    assert status.running_plan(db, listed) == Deployed(revision=digest, runs="postgres:17", kind="image")
+    url = App("u", "", "main", "push", "t", "https://example.com/x.yml")
+    assert status.running_plan(url, _listed(_app_box("u", "postgres:17"))) is None
+    assert status.running_plan(HELDSO, _listed()) is None
+
+
+def test_running_plan_of_a_0_11_record_reads_the_template_from_its_image():
+    record = _deploy("heldso", "f" * 40, image="localhost/heldso:ffffffffffff-3f9a1c2e")
+    assert status.running_plan(HELDSO, _listed(record)) == Deployed(revision="f" * 40, template="3f9a1c2e")
+
+
+def test_a_failed_first_deploy_has_no_plan():
+    assert status.running_plan(HELDSO, _listed(_deploy("heldso", "new", code=1, **NEW))) is None
 
 
 @pytest.mark.parametrize(

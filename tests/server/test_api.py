@@ -803,7 +803,7 @@ async def test_app_unknown_fields_are_400(yard):
     assert res.json()["error"]["code"] == "unknown_field"
 
 
-async def test_app_files_route(yard, tmp_path):
+async def test_app_files_route(yard, tmp_path, monkeypatch):
     client, token, _root = yard
     await client.post(
         "/api/v1/apps",
@@ -813,12 +813,10 @@ async def test_app_files_route(yard, tmp_path):
     res = await client.get("/api/v1/apps/heldso/files/compose", headers=auth(token))
     assert res.status_code == 404
 
-    from app.server.store import Deployed, write_deployed
-
     clone = tmp_path / "apps" / "heldso" / "repo"
     clone.mkdir(parents=True)
     (clone / "compose.yml").write_text("services: {}\n")
-    write_deployed(_config(tmp_path), "heldso", Deployed(revision="abc", runs="compose.yml", kind="compose"))
+    _deploy_record(monkeypatch, "heldso", sha="abc", runs="compose.yml", kind="compose")
     res = await client.get("/api/v1/apps/heldso/files/compose", headers=auth(token))
     assert res.status_code == 200
     assert res.text == "services: {}\n"
@@ -828,23 +826,7 @@ async def test_app_files_route(yard, tmp_path):
     assert "compose file" in res.text
 
 
-def _config(tmp_path):
-    from app.server.store import Config
-
-    return Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="",
-        skip_deploy=True,
-        boot=False,
-        remote=False,
-        journal_dir=tmp_path / "j",
-        journalctl_bin="",
-        journal_socket=tmp_path / "s.sock",
-    )
-
-
-async def test_app_files_the_yard_files(yard, tmp_path):
+async def test_app_files_the_yard_files(yard, monkeypatch):
     client, token, _root = yard
     await client.post(
         "/api/v1/apps",
@@ -853,7 +835,7 @@ async def test_app_files_the_yard_files(yard, tmp_path):
     )
     res = await client.get("/api/v1/apps/db/files/containerfile", headers=auth(token))
     assert res.status_code == 404
-    write_dep(tmp_path, "db", "image")
+    _deploy_record(monkeypatch, "db", sha="sha256:" + "a" * 64, runs="postgres:17", kind="image")
     res = await client.get("/api/v1/apps/db/files/containerfile", headers=auth(token))
     assert res.status_code == 404
     assert "runs an image" in res.text
@@ -862,10 +844,23 @@ async def test_app_files_the_yard_files(yard, tmp_path):
     assert "# app.compose.yml" in res.text and "image: ${IMAGE}" in res.text
 
 
-def write_dep(tmp_path, name, kind):
-    from app.server.store import Deployed, write_deployed
+def _deploy_record(monkeypatch, name: str, **labels: str) -> None:
+    """Podman lists one ok deploy container with these labels; every other call fails."""
+    listed = [
+        {
+            "Names": [f"deploy-{name}"],
+            "State": "exited",
+            "ExitCode": 0,
+            "Labels": {f"yard.{key}": value for key, value in labels.items()},
+        }
+    ]
 
-    write_deployed(_config(tmp_path), name, Deployed(revision="sha256:" + "a" * 64, runs="postgres:17", kind=kind))
+    async def fake_run(self, *args, timeout=None):
+        if args[:1] == ("ps",):
+            return json.dumps(listed)
+        raise YardError(502, "podman", "no podman in the test")
+
+    monkeypatch.setattr(Podman, "run", fake_run)
 
 
 async def test_patch_repo_on_an_image_app_is_400(yard):
@@ -918,7 +913,6 @@ async def test_deploy_is_a_job(yard):
         "image",
         "error",
         "previous",
-        "port",
     }
     assert fields <= set(job)
     res = await client.post("/api/v1/apps/db/deploy", json={"other": 1}, headers=auth(token))

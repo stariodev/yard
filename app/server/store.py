@@ -36,7 +36,6 @@ class Config:
     remote: bool
     check_seconds: float = 300.0
     prune_days: int = 7
-    sha: str = ""
     journal_dir: Path = Path("/var/log/journal")
     journalctl_bin: str = "journalctl"
     journal_socket: Path = Path("/run/systemd/journal/socket")
@@ -99,7 +98,6 @@ class Config:
             remote=remote,
             check_seconds=float(os.environ.get("YARD_CHECK_SECONDS", "300")),
             prune_days=int(os.environ.get("YARD_PRUNE_DAYS", "7")),
-            sha=os.environ.get("SHA", ""),
             journal_dir=Path(os.environ.get("YARD_JOURNAL_DIR", "/var/log/journal")),
             journalctl_bin=os.environ.get("YARD_JOURNALCTL_BIN", "journalctl"),
             journal_socket=Path(os.environ.get("YARD_JOURNAL_SOCKET", "/run/systemd/journal/socket")),
@@ -123,7 +121,7 @@ class App:
 
 @dataclass(slots=True)
 class Deployed:
-    """What the last ok deploy ran, kept in apps/<name>/deployed."""
+    """What a deploy runs: its revision and plan. The deploy container's labels hold it."""
 
     revision: str = ""
     runs: str = ""
@@ -421,38 +419,6 @@ def _read_app(name: str, text: str) -> App:
         fields["created"],
         fields["runs"],
     )
-
-
-def _deployed_file(config: Config, name: str) -> Path:
-    return config.app_dir(name) / "deployed"
-
-
-def read_deployed(config: Config, name: str) -> Deployed | None:
-    """The deployed file, or None when the app never deployed ok."""
-    path = _deployed_file(config, name)
-    if not path.is_file():
-        return None
-    fields = {"revision": "", "runs": "", "kind": "", "reason": "", "template": ""}
-    for line in path.read_text().splitlines():
-        key, _, value = line.partition(" ")
-        if key in fields:
-            fields[key] = value.strip()
-    return Deployed(**fields)
-
-
-def write_deployed(config: Config, name: str, deployed: Deployed) -> None:
-    text = "".join(
-        f"{key} {value}\n"
-        for key, value in (
-            ("revision", deployed.revision),
-            ("runs", deployed.runs),
-            ("kind", deployed.kind),
-            ("reason", deployed.reason),
-            ("template", deployed.template),
-        )
-        if value
-    )
-    atomic_write(_deployed_file(config, name), text)
 
 
 def ensure_admin(store: Store) -> str:

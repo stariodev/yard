@@ -495,6 +495,70 @@ async def test_events_merge_podman_and_yard(yard_journal):
     assert argv[argv.index("--since") + 1] == "-1d"
 
 
+def _deploy_event(event: str, code: str = "") -> str:
+    """A Podman event of the apply container. Its labels are the deploy record."""
+    labels = {
+        "yard.sha": "b3550ab" + "0" * 33,
+        "yard.image": "localhost/stario-site:b3550ab00000",
+        "yard.runs": "yard:stario",
+        "yard.kind": "containerfile",
+        "yard.cause": "push",
+        "yard.actor": "webhook:github",
+        "yard.previous": "localhost/stario-site:f5f6ab300000",
+    }
+    entry = {
+        "__REALTIME_TIMESTAMP": MICROS,
+        "SYSLOG_IDENTIFIER": "podman",
+        "PODMAN_TYPE": "container",
+        "PODMAN_EVENT": event,
+        "PODMAN_NAME": "deploy-stario-site",
+        "PODMAN_ID": FULL_ID,
+        "PODMAN_IMAGE": "localhost/yard-apply:latest",
+        "PODMAN_LABELS": json.dumps(labels),
+        "MESSAGE": f"container {event} deploy-stario-site",
+    }
+    if code:
+        entry["PODMAN_EXIT_CODE"] = code
+    return json.dumps(entry)
+
+
+async def test_deploy_events_come_from_the_deploy_container(yard_journal):
+    """Podman's create and died events of `deploy-<name>` are the deploy.start and deploy.end rows.
+
+    They come from the container, so a Yard restart in the middle of a deploy loses neither.
+    """
+    client, token, _argv, out = yard_journal
+    lines = [_deploy_event("create"), _deploy_event("start"), _deploy_event("died", "0"), _deploy_event("died", "3")]
+    out.write_text("\n".join(lines) + "\n")
+    res = await client.get("/api/v1/events?app=stario-site&event=deploy.", headers=auth(token))
+    assert res.status_code == 200
+    start, end, reverted = res.json()
+    sha = "b3550ab" + "0" * 33
+    assert start == {
+        "time": start["time"],
+        "source": "yard",
+        "event": "deploy.start",
+        "app": "stario-site",
+        "container": "deploy-stario-site",
+        "actor": "webhook:github",
+        "sha": sha,
+        "message": "deploy stario-site b3550ab00000",
+        "fields": {
+            "image": "localhost/stario-site:b3550ab00000",
+            "runs": "yard:stario",
+            "kind": "containerfile",
+            "cause": "push",
+        },
+    }
+    assert end["event"] == "deploy.end" and end["status"] == "ok" and end["sha"] == sha
+    assert end["message"] == "deploy stario-site ok"
+    assert reverted["status"] == "reverted"
+    assert reverted["fields"]["error"] == "unhealthy; reverted to localhost/stario-site:f5f6ab300000"
+    # The other events of the apply container stay Podman rows.
+    res = await client.get("/api/v1/events?app=stario-site&source=podman", headers=auth(token))
+    assert [row["event"] for row in res.json()] == ["start"]
+
+
 async def test_events_filters(yard_journal):
     client, token, _argv, out = yard_journal
     out.write_text(PODMAN_DIED + "\n" + YARD_DEPLOY + "\n")

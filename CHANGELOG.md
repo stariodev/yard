@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- The deploy container `deploy-<name>` is the only deploy record. Before, Yard also wrote `apps/<name>/deployed` and the `deploy.end` event after the apply ended. A Yard self-deploy that replaced the process in the middle of another app's deploy lost both: the app ran the new revision, but `yard status` showed the old one, and the check loop deployed the same revision again (seen on 2026-11-02 for stario-site).
+- Yard writes every label when it creates the deploy container: `yard.sha`, `yard.image`, `yard.runs`, `yard.kind`, `yard.reason`, `yard.template`, `yard.cause`, `yard.actor`, `yard.previous`, and the plan that ran before the deploy (`yard.before.revision`, `yard.before.runs`, `yard.before.kind`, `yard.before.reason`, `yard.before.template`). Nothing is written after the deploy.
+- The running revision is the new plan on exit 0, else the plan before the deploy. A host with no labelled deploy container reads the image of `<name>-app-1`: `localhost/<name>:<sha12>-<tpl8>` for a repo app, `<ref>@sha256:...` for an image app. A URL app with no record has no running revision until its next deploy. A 0.11.0 record without the plan labels reads the template from its image.
+- The check loop reads the last tried (revision, template) pair from the deploy container, so a failed pair is not tried again after a restart either.
+- `apps/<name>/deployed` is no longer read or written. An upgraded host can delete it.
+- The `deploy.start` and `deploy.end` journal events are gone. `GET /api/v1/events` makes the `deploy.start` and `deploy.end` rows from Podman's `create` and `died` events of `deploy-<name>`, with the same shape (`source` is `yard`). The status comes from the exit code: 0 is `ok`, 3 is `reverted`, any other code is `failed`. `yard events --event deploy.` works as before. Rows from older Yard versions still come from the journal.
+- A running `deploy-<name>` container is the deploy lock, also after a Yard restart. Before, only the in-memory job stopped a second deploy, and each deploy ran `podman run --replace`. On 2026-11-02 from 21:25 to 21:28, each push replaced the running `deploy-yard`, so three yard self-deploys stopped in the middle and had no `deploy.end`.
+- Yard removes the last deploy container with a plain `podman rm` (no `-f`), then runs the new one without `--replace`. Podman refuses to remove a running container, so a running deploy is never replaced.
+- A check or a webhook that finds a running deploy for another revision follows it. When it ends, the check runs again, so the newest revision still deploys once. The new Yard process after a self-deploy picks up a newer tip the same way.
+- `POST /api/v1/apps/{name}/deploy` joins a running deploy, also after a restart: the job streams the deploy container's log from its first line, and its status comes from the exit code. `yard app deploy` follows it as before.
+- A URL app deploy prunes the old compose copies when it starts. It keeps the running copy and the new one.
+- The deploy job reads the exposed port when the client asks for the job after an ok deploy. The `SHA` env of the Yard container is no longer read.
+
 ## 0.11.0
 
 - Breaking: the CLI prints JSON only with `--json`. Before, it printed JSON whenever stdout was not a terminal, so `yard env cat > .env` wrote JSON and `yard logs | grep` searched a JSON blob. `--text` is gone.

@@ -4,9 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app.server.store import Deployed, Store, ensure_admin, read_deployed, write_deployed
+from app.server.store import Store, ensure_admin
 from app.shared import YardError
-from tests.server.conftest import make_yard
 
 
 def test_store_rows(tmp_path):
@@ -126,16 +125,6 @@ def test_runs_pair_rule(tmp_path: Path):
     assert store.app("db").repo == ""
     app = store.update_app("db", runs="https://example.com/x.yml")
     assert app.runs == "https://example.com/x.yml"
-
-
-def test_deployed_round_trip(tmp_path: Path):
-    yard = make_yard(tmp_path)
-    assert read_deployed(yard.config, "heldso") is None
-    dep = Deployed(revision="abc", runs="yard:python-uv", kind="containerfile", reason="r", template="3f9a1c2e")
-    write_deployed(yard.config, "heldso", dep)
-    found = read_deployed(yard.config, "heldso")
-    assert found == dep
-    assert "template 3f9a1c2e" in (tmp_path / "apps" / "heldso" / "deployed").read_text()
 
 
 def test_repo_less_app_has_no_ref(tmp_path: Path):
