@@ -887,6 +887,7 @@ async def test_page_record_is_the_record():
         image="localhost/heldso:abc1234",
         sha="abc1234",
         env_file="/env",
+        dir="/srv/yard/apps/heldso",
         rows=[],
         hosts=[],
         deploy=None,
@@ -1124,3 +1125,11 @@ async def test_deploy_get_reads_the_deploy_container(yard, monkeypatch):
     assert deploy["error"] == "unhealthy; reverted to postgres:16"
     page = (await client.get("/api/v1/apps/db", headers=auth(token))).json()
     assert page["deploy"]["status"] == "reverted"
+
+
+async def test_logs_and_events_share_the_lines_limit(yard):
+    client, token, _root = yard
+    for path in ("/api/v1/logs?container=heldso-app-1&lines=10001", "/api/v1/events?lines=10001"):
+        res = await client.get(path, headers=auth(token))
+        assert res.status_code == 400
+        assert res.json()["error"]["code"] == "bad_lines"

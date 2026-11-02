@@ -164,6 +164,16 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     assert "ok   podman" in out
     assert "FAIL caddy config  ambiguous site definition: shop.example.com" in out
 
+    # --json keeps the status report's shape; --full adds the doctor rows under "doctor".
+    main(["status", "--json"])
+    plain = json.loads(capsys.readouterr().out)
+    assert "doctor" not in plain
+    with pytest.raises(SystemExit):
+        main(["status", "--full", "--json"])
+    full = json.loads(capsys.readouterr().out)
+    assert full["rows"] == plain["rows"]
+    assert [row["name"] for row in full["doctor"]] == ["podman", "caddy config"]
+
 
 def test_app_deploy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     seen: dict = {}
@@ -208,6 +218,7 @@ def _rm_api(page: dict, deleted: dict):
 _RM_PAGE = {
     "app": {"name": "heldso"},
     "env_file": "/srv/yard/apps/heldso/env",
+    "dir": "/srv/yard/apps/heldso",
     "rows": [{"container": "heldso-app-1", "data": 1_200_000_000}],
     "hosts": ["heldso.example.com"],
     "deploy": None,
@@ -2129,3 +2140,34 @@ def test_app_new_no_repo_names_repo_new(monkeypatch: pytest.MonkeyPatch, tmp_pat
     err = capsys.readouterr().err
     assert "no repo" in err
     assert "yard repo new" in err
+
+
+def test_json_asks_for_json_and_logs_print_the_page(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    """--json sends Accept: application/json, so yard logs prints the entries page Medic reads."""
+    _env(monkeypatch)
+    monkeypatch.setattr(cli, "_json", True)
+    request = cli._request(cli.Client("http://127.0.0.1:8000", "token"), "GET", "/api/v1/logs", None)
+    assert request.get_header("Accept") == "application/json"
+    monkeypatch.setattr(cli, "_json", False)
+    request = cli._request(cli.Client("http://127.0.0.1:8000", "token"), "GET", "/api/v1/logs", None)
+    assert request.get_header("Accept") is None
+
+    page = {"entries": [{"cursor": "c1", "container": "heldso-app-1", "time": "t", "message": "hi"}], "cursor": "c1"}
+    monkeypatch.setattr(cli, "_api_try", lambda client, method, path, body, timeout=None: (200, json.dumps(page)))
+    main(["logs", "heldso-app-1", "--json"])
+    assert json.loads(capsys.readouterr().out) == page
+
+
+def test_events_follow_prints_table_lines(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    _env(monkeypatch)
+    rows = [
+        {"time": "2026-11-02T10:00:00Z", "source": "yard", "event": "deploy.end", "app": "heldso", "status": "ok"},
+        {"time": "2026-11-02T10:00:01Z", "source": "podman", "event": "died", "app": "heldso", "container": "x"},
+    ]
+
+    body = b"".join(json.dumps(row).encode() + b"\n" for row in rows)
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda request: io.BytesIO(body))
+    main(["events", "-f"])
+    out = capsys.readouterr().out
+    assert "deploy.end" in out and "died" in out
+    assert "{" not in out

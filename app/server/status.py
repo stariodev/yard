@@ -67,6 +67,7 @@ class Page:
     image: str
     sha: str
     env_file: str
+    dir: str
     rows: list[Row]
     hosts: list[str]
     deploy: dict[str, Any] | None
@@ -237,6 +238,7 @@ async def app_report(yard: Yard, name: str) -> Page:
         image=image,
         sha=deployed.revision if deployed else image_sha(image),
         env_file=str(config.env(name)),
+        dir=str(config.app_dir(name)),
         rows=rows,
         hosts=hosts,
         deploy=note,
