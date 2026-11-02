@@ -27,8 +27,9 @@ def _app(name: str, trigger: str = "") -> App:
     return App(name, "https://origin.cursor.com/org/heldso", "main", trigger or "push", "")
 
 
-def _checkout(root: Path, files: dict[str, str]) -> Path:
-    directory = root / "src" / "heldso" / "abc"
+def _checkout(root: Path, files: dict[str, str], name: str = "heldso") -> Path:
+    """The app's clone, where compose.project reads a repo app's files."""
+    directory = root / "apps" / name / "repo"
     directory.mkdir(parents=True)
     for name, text in files.items():
         path = directory / name
@@ -73,18 +74,16 @@ def test_run_env_is_the_interpolation_env(tmp_path: Path):
 def test_project_containerfile_composes_app_and_build(tmp_path: Path):
     config = _config(tmp_path)
     checkout = _checkout(tmp_path, {"Containerfile": "FROM scratch\n"})
-    found = project(
-        config,
-        _app("heldso"),
-        "containerfile",
-        "Containerfile",
-        "abc",
-        "localhost/heldso:abc",
-        checkout,
-        "Containerfile",
-    )
+    found = project(config, _app("heldso"), Deployed(revision="abc", runs="Containerfile", kind="containerfile"))
     assert found.files == [APP_COMPOSE, BUILD_COMPOSE]
     assert found.env["DOCKERFILE"] == "Containerfile"
+    assert found.env["CHECKOUT"] == str(checkout)
+    assert found.image == "localhost/heldso:abc"
+    written = project(
+        config, _app("heldso"), Deployed(revision="abc", runs="yard:go", kind="containerfile", template="3f9a1c2e")
+    )
+    assert written.env["DOCKERFILE"] == str(tmp_path / "apps" / "heldso" / "Containerfile")
+    assert written.image == "localhost/heldso:abc-3f9a1c2e"
     assert found.env["YARD_FILES"] == "1"
     env_file = tmp_path / "apps" / "heldso" / "env"
     assert env_file.read_text() == ""
@@ -93,7 +92,7 @@ def test_project_containerfile_composes_app_and_build(tmp_path: Path):
 def test_project_repo_compose_is_one_file(tmp_path: Path):
     config = _config(tmp_path)
     checkout = _checkout(tmp_path, {"compose.yml": FULL})
-    found = project(config, _app("heldso"), "compose", "compose.yml", "abc", "localhost/heldso:abc", checkout)
+    found = project(config, _app("heldso"), Deployed(revision="abc", runs="compose.yml", kind="compose"))
     assert found.files == [str(checkout / "compose.yml")]
     assert "YARD_FILES" not in found.env
 
@@ -101,10 +100,10 @@ def test_project_repo_compose_is_one_file(tmp_path: Path):
 def test_project_image_app_is_app_only(tmp_path: Path):
     config = _config(tmp_path)
     app = App("db", "", "main", "push", "", "postgres:17")
-    found = project(
-        config, app, "image", "", "sha256:" + "a" * 64, f"postgres:17@sha256:{'a' * 64}", config.app_dir("db")
-    )
+    found = project(config, app, Deployed(revision="sha256:" + "a" * 64, runs=app.runs, kind="image"))
     assert found.files == [APP_COMPOSE]
+    assert found.image == f"postgres:17@sha256:{'a' * 64}"
+    assert found.env["CHECKOUT"] == str(config.app_dir("db"))
     assert found.env["YARD_FILES"] == "1"
 
 
@@ -112,14 +111,15 @@ def test_project_url_compose_is_the_copy(tmp_path: Path):
     config = _config(tmp_path)
     app = App("u", "", "main", "push", "", "https://example.com/x.yml")
     rev = "sha256:" + "b" * 64
-    found = project(config, app, "compose", app.runs, rev, f"compose:{rev[7:19]}", config.app_dir("u"))
+    found = project(config, app, Deployed(revision=rev, runs=app.runs, kind="compose"))
+    assert found.image == f"compose:{rev[7:19]}"
     assert found.files == [str(tmp_path / "apps" / "u" / "compose" / f"{rev[7:19]}.yml")]
 
 
 def test_the_yard_app_gets_its_host_paths_from_config(tmp_path: Path):
     config = _config(tmp_path)
-    checkout = _checkout(tmp_path, {"ops/compose.yml": FULL})
-    found = project(config, _app("yard"), "compose", "ops/compose.yml", "abc", "localhost/yard:abc", checkout)
+    checkout = _checkout(tmp_path, {"ops/compose.yml": FULL}, "yard")
+    found = project(config, _app("yard"), Deployed(revision="abc", runs="ops/compose.yml", kind="compose"))
     assert found.env["YARD_ROOT"] == str(tmp_path)
     assert found.env["YARD_PODMAN_SOCK"] == "/run/podman.sock"
     assert found.env["YARD_PODMAN_DIR"] == "/run"
@@ -284,8 +284,8 @@ def test_install_sh_and_apply_pass_the_same_env_names(tmp_path: Path, monkeypatc
         return 0, ""
 
     monkeypatch.setattr(compose, "_run", fake_run)
-    checkout = _checkout(tmp_path, {"ops/compose.yml": FULL})
-    found = project(config, _app("yard"), "compose", "ops/compose.yml", "abc", "localhost/yard:abc", checkout)
+    _checkout(tmp_path, {"ops/compose.yml": FULL}, "yard")
+    found = project(config, _app("yard"), Deployed(revision="abc", runs="ops/compose.yml", kind="compose"))
     asyncio.run(compose.apply(config, "yard", "up", found))
     argv, _env = calls[-1]
     python_names = {value.split("=", 1)[0] for flag, value in zip(argv, argv[1:], strict=False) if flag == "-e"}
