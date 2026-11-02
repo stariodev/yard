@@ -232,8 +232,7 @@ class Ready:
 async def _ready_repo(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
     """Sync the clone to the ref tip and resolve the plan."""
     forge = yard.forge(app.repo)
-    if not forge.connected():
-        raise YardError(502, "forge", f"{forge.name} is not connected. Run yard forge setup {forge.name}.")
+    forge.require_connected()
     config = yard.config
     checkout = config.clone(app.name)
     token = await forge.token(app.repo)
