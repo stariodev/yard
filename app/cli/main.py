@@ -185,6 +185,9 @@ def _stream(client: Client, method: str, path: str, body: object) -> None:
 def _request(client: Client, method: str, path: str, body: object) -> urllib.request.Request:
     data = body if isinstance(body, bytes) or body is None else json.dumps(body).encode()
     headers = {"authorization": f"Bearer {client.token}"}
+    if _json:
+        # The logs route answers its entries page for JSON; every other route answers the same either way.
+        headers["accept"] = "application/json"
     if data is not None:
         headers["content-type"] = "text/caddyfile" if isinstance(body, bytes) else "application/json"
     return urllib.request.Request(client.url + path, data=data, headers=headers, method=method)
@@ -308,7 +311,8 @@ def _cmd_status(args: argparse.Namespace) -> None:
     if getattr(args, "full", False):
         checks = _object(_api(session, "GET", "/api/v1/doctor", None))
     if _json:
-        print(json.dumps({"status": report, "doctor": checks}) if checks is not None else raw)
+        # One shape: the status report, with the doctor rows under "doctor" for --full.
+        print(json.dumps({**report, "doctor": checks}) if checks is not None and isinstance(report, dict) else raw)
         _doctor_exit(checks)
         return
     if not isinstance(report, dict):
@@ -656,9 +660,6 @@ def _logs(session: Client, container: str, args: argparse.Namespace) -> None:
         _stream_get(session, path)
         return
     raw = _api(session, "GET", path, None)
-    if _json:
-        print(json.dumps({"log": raw}))
-        return
     print(raw, end="" if raw.endswith("\n") or not raw else "\n")
 
 
@@ -672,8 +673,11 @@ def _cmd_events(args: argparse.Namespace) -> None:
     if args.follow:
         query["follow"] = "1"
     path = "/api/v1/events?" + urlencode(query)
-    if args.follow:
+    if args.follow and _json:
         _stream_get(session, path)
+        return
+    if args.follow:
+        _follow_events(session, path)
         return
     raw = _api(session, "GET", path, None)
     if _json:
@@ -684,6 +688,25 @@ def _cmd_events(args: argparse.Namespace) -> None:
         print(raw)
         return
     print(format_events(rows, color=_color_on()), end="")
+
+
+def _follow_events(session: Client, path: str) -> None:
+    """The NDJSON event stream, one table line for each event as it arrives."""
+    request = _request(session, "GET", path, None)
+    try:
+        response = urllib.request.urlopen(request)
+    except urllib.error.HTTPError as exc:
+        _die(explain(exc.read().decode().strip()))
+    except urllib.error.URLError as exc:
+        _die(_unreachable(session, str(exc.reason), "GET", path))
+    with response:
+        try:
+            for raw in response:
+                row = _object(raw.decode())
+                if isinstance(row, dict):
+                    print(format_events([row], color=_color_on()), end="", flush=True)
+        except KeyboardInterrupt:
+            sys.exit(130)
 
 
 def _follow_deploy(session: Client, name: str) -> dict:
@@ -769,7 +792,7 @@ def _rm_preview(session: Client, name: str) -> None:
     page = _object(_api(session, "GET", f"/api/v1/apps/{quote(name)}", None))
     page = page if isinstance(page, dict) else {}
     env_file = str(page.get("env_file") or "")
-    app_dir = str(Path(env_file).parent) if env_file else ""
+    app_dir = str(page.get("dir") or "")
     rows = [row for row in page.get("rows") or [] if isinstance(row, dict)]
     containers = ", ".join(str(row["container"]) for row in rows if row.get("container"))
     data = sum(int(row.get("data") or 0) for row in rows if isinstance(row.get("data"), int))
@@ -1457,7 +1480,7 @@ def _parser() -> argparse.ArgumentParser:
     events.add_argument("--since", default="", help="-15m, -1h, -2d, or 2025-01-31 14:00")
     events.add_argument("--until", default="", help="same forms as --since")
     events.add_argument("--tail", type=int, default=200, help="how many rows")
-    events.add_argument("-f", "--follow", action="store_true", help="stream new events as ndjson")
+    events.add_argument("-f", "--follow", action="store_true", help="stream new events; NDJSON with --json")
     events.set_defaults(func=_cmd_events)
 
     for name, help_text, build in (

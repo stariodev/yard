@@ -101,6 +101,7 @@ def page_json(page: status.Page, deployed: Deployed | None = None) -> dict[str, 
         "image": page.image,
         "sha": page.sha,
         "env_file": page.env_file,
+        "dir": page.dir,
         "rows": [asdict(row) for row in page.rows],
         "hosts": page.hosts,
         "deploy": page.deploy,
@@ -208,18 +209,6 @@ def _container_match(given: str) -> str:
     )
 
 
-def _event_lines(value: str) -> int:
-    if not value:
-        return 200
-    try:
-        lines = int(value)
-    except ValueError:
-        lines = 0
-    if not 1 <= lines <= 5_000:
-        raise YardError(400, "bad_lines", "bad lines", help_text="lines is 1 to 5000.")
-    return lines
-
-
 def _event_row(entry: dict) -> dict | None:
     """One journald entry as a public event, or None when it carries no event."""
     when = journal.timestamp(entry)
@@ -289,7 +278,8 @@ def _event_keeps(row: dict, app: str, container: str, source: str, event: str) -
     return True
 
 
-def _log_lines(value: str) -> int:
+def _lines(value: str) -> int:
+    """The lines query of logs and events: 1 to 10000, 100 when it is not given."""
     if not value:
         return 100
     try:
@@ -678,7 +668,7 @@ class HostPage:
         {"entries": [...], "cursor": ...} instead of text lines.
         """
         query = c.req.query
-        lines = _log_lines(str(query.get("lines") or ""))
+        lines = _lines(str(query.get("lines") or ""))
         since = _log_time(str(query.get("since") or ""))
         until = _log_time(str(query.get("until") or ""))
         after = str(query.get("after") or "")
@@ -710,7 +700,7 @@ class HostPage:
     async def events_get(self, c: Context, w: Writer) -> None:
         """One merged timeline of Podman and Yard events."""
         query = c.req.query
-        lines = _event_lines(str(query.get("lines") or ""))
+        lines = _lines(str(query.get("lines") or ""))
         since = _log_time(str(query.get("since") or "")) or "-1d"
         until = _log_time(str(query.get("until") or ""))
         want = (
