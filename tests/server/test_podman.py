@@ -120,3 +120,14 @@ def test_parse_health():
 def test_format_stamp():
     assert format_stamp(datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)) == "2026-10-05T12:00:00Z"
     assert format_stamp(datetime(2026, 10, 5, 12, 0, 0, 120000, tzinfo=UTC)) == "2026-10-05T12:00:00.12Z"
+
+
+def test_parse_ps_keeps_the_yard_labels_of_a_deploy_container():
+    raw = """[
+        {"Id":"d","Names":["deploy-heldso"],
+         "Labels":{"yard.sha":"abc","yard.cause":"push","yard.error":"","other":"x"}},
+        {"Id":"a","Names":["heldso-app-1"],"Labels":{"yard.sha":"ignored"}}
+    ]"""
+    got = parse_ps(raw)
+    assert got["deploy-heldso"].labels == {"sha": "abc", "cause": "push"}
+    assert got["heldso-app-1"].labels == {}

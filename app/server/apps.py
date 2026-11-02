@@ -204,44 +204,202 @@ async def _deploy_body(yard: Yard, job: Job) -> Outcome:
         if yard.config.skip_deploy:
             job.push("YARD_SKIP_DEPLOY is set. Deploy did not run.")
             return Outcome("skipped")
-        if app.repo:
-            job.push(f"== sync {app.repo} {app.ref}")
-            return await _deploy_repo(yard, app, job, cause=job.cause, actor=job.actor)
-        kind, _value = parse_runs(app.runs)
-        if kind not in ("image", "url"):
-            job.push(f"!! app {name} has no repo")
-            job.push("Set the repo: yard app set --repo https://<host>/<owner>/<name>")
-            return Outcome("failed", error=f"app {name} has no repo")
-        job.push(f"== pull {app.runs}" if kind == "image" else f"== fetch {app.runs}")
-        return await _deploy_source(yard, app, kind, job, cause=job.cause, actor=job.actor)
+        ready = Ready(revision="")
+        try:
+            if app.repo:
+                job.push(f"== sync {app.repo} {app.ref}")
+                ready = await _ready_repo(yard, app, job, ready)
+            else:
+                ready = await _ready_source(yard, app, job, ready)
+        except YardError as exc:
+            # The apply never ran. A failed deploy container still records this deploy.
+            job.push(f"!! {exc}")
+            outcome = Outcome("failed", ready.image, str(exc))
+            await compose.record_failure(yard.config, app.name, _labels(job, ready, outcome), job.lines)
+            _deploy_end(yard, app, ready.revision, outcome)
+            return outcome
+        return await _apply(yard, app, job, ready)
 
 
-async def _deploy_repo(yard: Yard, app: App, job: Job, *, cause: str, actor: str) -> Outcome:
-    """Sync the clone to the ref tip, resolve the plan, run the apply."""
-    try:
-        forge = yard.forge(app.repo)
-    except YardError as exc:
-        return Outcome("failed", error=str(exc))
+@dataclass(slots=True)
+class Ready:
+    """What a deploy applies. Each source fills it; `_apply` runs it the same way."""
+
+    revision: str
+    image: str = ""
+    project: compose.Project | None = None
+    deployed: Deployed | None = None
+    # A URL compose app reverts to its previous file, not to an image.
+    revert_image: bool = True
+
+
+async def _ready_repo(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
+    """Sync the clone to the ref tip and resolve the plan."""
+    forge = yard.forge(app.repo)
     if not forge.connected():
-        return Outcome(
-            "failed",
-            error=f"{forge.name} is not connected. Run yard forge setup {forge.name}.",
-        )
-    head = ""
+        raise YardError(502, "forge", f"{forge.name} is not connected. Run yard forge setup {forge.name}.")
+    config = yard.config
+    checkout = config.clone(app.name)
+    token = await forge.token(app.repo)
+    ready.revision = await git.sync(checkout, clone_url(app.repo), app.ref, token)
+    # Stamp the tried pair before the plan can fail, or the check loop retries every round.
+    _set_tried(yard, app.name, ready.revision, _template_at(checkout, app))
+    plan = _plan(yard, app, ready.revision)
+    _set_tried(yard, app.name, ready.revision, plan.template)
+    ready.image = compose.image_tag(app.name, ready.revision, plan.template)
+    dockerfile = ""
+    if plan.kind == "containerfile":
+        dockerfile = str(config.app_dir(app.name) / "Containerfile") if plan.answer.startswith("yard:") else plan.answer
     try:
-        token = await forge.token(app.repo)
-        head = await git.sync(yard.config.clone(app.name), clone_url(app.repo), app.ref, token)
-        # Stamp the tried pair before the plan can fail, or the check loop retries every round.
-        _set_tried(yard, app.name, head, _template_at(yard.config.clone(app.name), app))
-        plan = _plan(yard, app, head)
-        _set_tried(yard, app.name, head, plan.template)
-        outcome = await _apply(yard, app, plan, head, job, cause=cause, actor=actor)
-    except YardError as exc:
-        # A sync or plan failure never reaches apply; deploy.end alone is the record.
-        job.push(f"!! {exc}")
-        outcome = Outcome("failed", error=str(exc))
-    _deploy_end(yard, app, head, outcome)
+        project = compose.project(
+            config, app, plan.kind, plan.answer, ready.revision, ready.image, checkout, dockerfile
+        )
+    except OSError as exc:
+        raise YardError(502, "compose", str(exc)) from exc
+    job.push(f"== runs {plan.answer} ({plan.kind}" + (f"; {plan.reason}" if plan.reason else "") + ")")
+    # A deploy of a sha whose image is still local skips the build.
+    if await _image_exists(yard, ready.image):
+        project.env["SKIP_BUILD"] = "1"
+    ready.project = project
+    ready.deployed = Deployed(
+        revision=ready.revision, runs=plan.answer, kind=plan.kind, reason=plan.reason, template=plan.template
+    )
+    return ready
+
+
+async def _ready_source(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
+    """A repo-less app: pin an image by digest, or fetch a compose file over https."""
+    config = yard.config
+    kind, _value = parse_runs(app.runs)
+    if kind not in ("image", "url"):
+        job.push("Set the repo: yard app set --repo https://<host>/<owner>/<name>")
+        raise YardError(400, "no_repo", f"app {app.name} has no repo")
+    job.push(f"== pull {app.runs}" if kind == "image" else f"== fetch {app.runs}")
+    previous_copy = None
+    if kind == "image":
+        ready.revision = await sources.digest(app.runs)
+        _set_tried(yard, app.name, ready.revision, "")
+        ready.image = f"{app.runs.split('@', 1)[0]}@{ready.revision}"
+    else:
+        body = await sources.fetch_file(app.runs)
+        ready.revision = "sha256:" + hashlib.sha256(body).hexdigest()
+        _set_tried(yard, app.name, ready.revision, "")
+        text = body.decode("utf-8", "replace")
+        if detect.classify(text) != "compose":
+            raise YardError(502, "detect", "a Containerfile needs a repo to build; a URL can name a compose file")
+        if detect.BUILD_LINE.search(text):
+            raise YardError(
+                502,
+                "detect",
+                "a compose file from a URL cannot build: there is no checkout",
+                help_text="Build the image elsewhere, or give the app a repo.",
+            )
+        kind = "compose"
+        ready.image = f"compose:{ready.revision[7:19]}"
+        ready.revert_image = False
+        previous = read_deployed(config, app.name)
+        if previous is not None and previous.revision:
+            previous_copy = config.compose_copy(app.name, previous.revision)
+        copy = config.compose_copy(app.name, ready.revision)
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(copy, text)
+    project = compose.project(config, app, kind, app.runs, ready.revision, ready.image, config.app_dir(app.name))
+    project.env["SKIP_BUILD"] = "1"
+    if previous_copy is not None and previous_copy.is_file():
+        project.env["PREVIOUS_COMPOSE_FILE"] = str(previous_copy)
+    ready.project = project
+    ready.deployed = Deployed(revision=ready.revision, runs=app.runs, kind=kind)
+    return ready
+
+
+async def _apply(yard: Yard, app: App, job: Job, ready: Ready) -> Outcome:
+    """One apply container runs compose up. That container is the record of this deploy."""
+    config = yard.config
+    assert ready.project is not None and ready.deployed is not None
+    project = ready.project
+    journal.send(
+        config,
+        "deploy.start",
+        f"deploy {app.name} {ready.revision[:12]}",
+        app=app.name,
+        sha=ready.revision,
+        image=ready.image,
+        runs=ready.deployed.runs,
+        kind=ready.deployed.kind,
+        cause=job.cause,
+        actor=job.actor,
+    )
+    # A failed `up --wait` reverts to the running image.
+    previous = await _running_image(yard, app.name)
+    if ready.revert_image and previous and previous != ready.image:
+        project.env["PREVIOUS_IMAGE"] = previous
+    labels = _labels(job, ready, Outcome("running", ready.image, previous=previous))
+    # Upgrading yard replaces this process, so that apply run is detached.
+    detach = app.name == "yard"
+    code, _text = await compose.apply(config, app.name, "up", project, labels=labels, detach=detach, on_line=job.push)
+    if detach:
+        return Outcome("pending", ready.image, previous=previous)
+    if code == 3:
+        outcome = Outcome("reverted", ready.image, f"unhealthy; reverted to {previous}", previous)
+    elif code:
+        outcome = Outcome("failed", ready.image, f"apply exited {code}", previous)
+    else:
+        outcome = Outcome("ok", ready.image, previous=previous)
+    _deploy_end(yard, app, ready.revision, outcome)
+    if outcome.status == "ok":
+        write_deployed(config, app.name, ready.deployed)
+        if ready.deployed.kind == "compose" and not app.repo:
+            _prune_copies(config.compose_copy(app.name, ready.revision))
+        outcome.port = await exposed_port(yard, app.name)
     return outcome
+
+
+def _labels(job: Job, ready: Ready, outcome: Outcome) -> dict[str, str]:
+    """The deploy container's labels: what `status.deploy_record` reads back."""
+    labels = {
+        "sha": ready.revision,
+        "image": ready.image,
+        "cause": job.cause,
+        "actor": job.actor,
+        "previous": outcome.previous,
+        "error": (outcome.error.splitlines() or [""])[0],
+    }
+    return {key: value for key, value in labels.items() if value}
+
+
+def _prune_copies(keep: Path) -> None:
+    """Keep the current URL copy and the newest one before it, for the revert."""
+    others = sorted(
+        (p for p in keep.parent.glob("*.yml") if p != keep),
+        key=lambda p: p.stat().st_mtime_ns,
+        reverse=True,
+    )
+    for path in others[1:]:
+        path.unlink()
+
+
+async def exposed_port(yard: Yard, name: str) -> int:
+    """The one tcp port the running app container exposes; 0 when it is not exactly one."""
+    try:
+        return podman.parse_port(await yard.podman.run("inspect", app_container(name), "--format", "json"))
+    except Exception:
+        return 0
+
+
+def _deploy_end(yard: Yard, app: App, sha: str, outcome: Outcome) -> None:
+    journal.send(
+        yard.config,
+        "deploy.end",
+        f"deploy {app.name} {outcome.status}",
+        priority=3 if outcome.status in {"failed", "reverted"} else 6,
+        app=app.name,
+        sha=sha,
+        image=outcome.image,
+        status=outcome.status,
+        previous=outcome.previous,
+        container=deploy_container(app.name),
+        error=(outcome.error.splitlines() or [""])[0],
+    )
 
 
 def _set_tried(yard: Yard, name: str, revision: str, template: str) -> Tip:
@@ -272,181 +430,6 @@ def _plan(yard: Yard, app: App, sha: str) -> Plan:
 def _key(answer: str) -> str:
     """The auto-guard key: all templates are one answer; a path change is a new answer."""
     return "template" if answer.startswith("yard:") else answer
-
-
-async def _deploy_source(yard: Yard, app: App, kind: str, job: Job, *, cause: str, actor: str) -> Outcome:
-    """A repo-less deploy: pin an image by digest, or fetch a compose file over https."""
-    config = yard.config
-    try:
-        if kind == "image":
-            revision = await sources.digest(app.runs)
-            _set_tried(yard, app.name, revision, "")
-            image = f"{app.runs.split('@', 1)[0]}@{revision}"
-        else:
-            body = await sources.fetch_file(app.runs)
-            _set_tried(yard, app.name, "sha256:" + hashlib.sha256(body).hexdigest(), "")
-            kind = detect.classify(body.decode("utf-8", "replace"))
-            if kind != "compose":
-                raise YardError(
-                    502,
-                    "detect",
-                    "a Containerfile needs a repo to build; a URL can name a compose file",
-                )
-            if detect.BUILD_LINE.search(body.decode("utf-8", "replace")):
-                raise YardError(
-                    502,
-                    "detect",
-                    "a compose file from a URL cannot build: there is no checkout",
-                    help_text="Build the image elsewhere, or give the app a repo.",
-                )
-            revision = "sha256:" + hashlib.sha256(body).hexdigest()
-            image = f"compose:{revision[7:19]}"
-            _set_tried(yard, app.name, revision, "")
-            _write_copy(config, app.name, revision, body)
-    except YardError as exc:
-        job.push(f"!! {exc}")
-        return Outcome("failed", error=str(exc))
-    _set_tried(yard, app.name, revision, "")
-    journal.send(
-        yard.config,
-        "deploy.start",
-        f"deploy {app.name} {revision[:12]}",
-        app=app.name,
-        sha=revision,
-        image=image,
-        runs=app.runs,
-        kind=kind,
-        cause=cause,
-        actor=actor,
-    )
-    previous_deployed = read_deployed(config, app.name)
-    project = compose.project(config, app, kind, app.runs, revision, image, config.app_dir(app.name))
-    project.env["SKIP_BUILD"] = "1"
-    previous = await _running_image(yard, app.name)
-    if kind == "image" and previous and previous != image:
-        project.env["PREVIOUS_IMAGE"] = previous
-    if kind == "compose" and previous_deployed is not None:
-        previous_copy = config.compose_copy(app.name, previous_deployed.revision)
-        if previous_copy.is_file():
-            project.env["PREVIOUS_COMPOSE_FILE"] = str(previous_copy)
-    code, _text = await compose.apply(config, app.name, "up", project, on_line=job.push)
-    if code == 3:
-        outcome = Outcome("reverted", image, f"unhealthy; reverted to {previous}", previous)
-    elif code:
-        outcome = Outcome("failed", image, f"apply exited {code}", previous)
-    else:
-        outcome = Outcome("ok", image, previous=previous)
-    _deploy_end(yard, app, revision, outcome)
-    if outcome.status == "ok":
-        write_deployed(config, app.name, Deployed(revision=revision, runs=app.runs, kind=kind))
-        if kind == "compose":
-            _prune_copies(config.compose_copy(app.name, revision))
-        outcome.port = await _exposed_port(yard, app.name)
-    return outcome
-
-
-def _write_copy(config: Config, name: str, revision: str, body: bytes) -> None:
-    path = config.compose_copy(name, revision)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, body.decode("utf-8", "replace"))
-
-
-def _prune_copies(keep: Path) -> None:
-    """Keep the current URL copy and the newest one before it, for the revert."""
-    others = sorted(
-        (p for p in keep.parent.glob("*.yml") if p != keep),
-        key=lambda p: p.stat().st_mtime_ns,
-        reverse=True,
-    )
-    for path in others[1:]:
-        path.unlink()
-
-
-async def _exposed_port(yard: Yard, name: str) -> int:
-    """The one tcp port the running app container exposes; 0 when it is not exactly one."""
-    try:
-        return podman.parse_port(await yard.podman.run("inspect", app_container(name), "--format", "json"))
-    except Exception:
-        return 0
-
-
-def _deploy_end(yard: Yard, app: App, sha: str, outcome: Outcome) -> None:
-    journal.send(
-        yard.config,
-        "deploy.end",
-        f"deploy {app.name} {outcome.status}",
-        priority=3 if outcome.status in {"failed", "reverted"} else 6,
-        app=app.name,
-        sha=sha,
-        image=outcome.image,
-        status=outcome.status,
-        previous=outcome.previous,
-        container=deploy_container(app.name),
-        error=(outcome.error.splitlines() or [""])[0],
-    )
-
-
-async def _apply(yard: Yard, app: App, plan: Plan, sha: str, job: Job, *, cause: str, actor: str) -> Outcome:
-    """The compose check, then one apply container for the rest."""
-    image = compose.image_tag(app.name, sha, plan.template)
-    config = yard.config
-    checkout = config.clone(app.name)
-    dockerfile = ""
-    if plan.kind == "containerfile":
-        dockerfile = str(config.app_dir(app.name) / "Containerfile") if plan.answer.startswith("yard:") else plan.answer
-    try:
-        project = compose.project(config, app, plan.kind, plan.answer, sha, image, checkout, dockerfile)
-    except Exception as exc:
-        job.push(f"!! {exc}")
-        return Outcome("failed", image, str(exc))
-
-    journal.send(
-        config,
-        "deploy.start",
-        f"deploy {app.name} {sha[:12]}",
-        app=app.name,
-        sha=sha,
-        image=image,
-        runs=plan.answer,
-        kind=plan.kind,
-        cause=cause,
-        actor=actor,
-    )
-
-    line = f"== runs {plan.answer} ({plan.kind}" + (f"; {plan.reason}" if plan.reason else "") + ")"
-    job.push(line)
-
-    # A deploy of a sha whose image is still local skips the build.
-    if await _image_exists(yard, image):
-        project.env["SKIP_BUILD"] = "1"
-
-    # A failed `up --wait` reverts to the running image.
-    previous = await _running_image(yard, app.name)
-    if previous and previous != image:
-        project.env["PREVIOUS_IMAGE"] = previous
-
-    # One apply container runs compose up. The deploy container is the record of this run.
-    code, _text = await compose.apply(
-        config,
-        app.name,
-        "up",
-        project,
-        detach=app.name == "yard",
-        on_line=job.push,
-    )
-    if app.name == "yard":
-        # Upgrading yard replaces this process, so that apply run is detached.
-        return Outcome("pending", image, previous=previous)
-    if code == 3:
-        return Outcome("reverted", image, f"unhealthy; reverted to {previous}", previous)
-    if code:
-        return Outcome("failed", image, f"apply exited {code}", previous)
-    write_deployed(
-        config,
-        app.name,
-        Deployed(revision=sha, runs=plan.answer, kind=plan.kind, reason=plan.reason, template=plan.template),
-    )
-    return Outcome("ok", image, previous=previous, port=await _exposed_port(yard, app.name))
 
 
 def app_file(config: Config, app: App, which: str) -> str:

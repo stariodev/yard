@@ -143,7 +143,7 @@ def status_hint(report: dict) -> str:
 
 
 def format_app_status(report: dict, now: datetime, *, color: bool = False) -> str:
-    """The one-app page: header, containers, deploys, log."""
+    """The one-app page: header, containers, the last deploy, log."""
     record_raw = report.get("app")
     record: dict = record_raw if isinstance(record_raw, dict) else {}
     name = str(record.get("name") or "")
@@ -192,8 +192,9 @@ def format_app_status(report: dict, now: datetime, *, color: bool = False) -> st
     )
     lines += ["", "containers"] + [f"  {line}" for line in containers]
 
-    deploys = [row for row in report.get("deploys") or [] if isinstance(row, dict)]
-    lines += ["", "deploys"]
+    deploy = report.get("deploy")
+    deploys = [deploy] if isinstance(deploy, dict) else []
+    lines += ["", "deploy"]
     if deploys:
         shown = _align(
             [
@@ -210,7 +211,7 @@ def format_app_status(report: dict, now: datetime, *, color: bool = False) -> st
         )
         lines += [f"  {line}" for line in shown]
     else:
-        lines.append("  no deploys yet")
+        lines.append("  no deploy yet")
 
     log = str(report.get("log") or "").rstrip("\n")
     lines += ["", "log"]

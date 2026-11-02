@@ -348,3 +348,31 @@ async def test_run_calls_on_line_in_order(tmp_path: Path, monkeypatch: pytest.Mo
     script.write_text("import sys\nprint('one')\nprint('two')\nsys.exit(0)\n")
     code, text = await compose._run([sys.executable, str(script)], {}, lines.append)
     assert code == 0 and lines == ["one", "two"] and "one" in text
+
+
+def test_record_failure_runs_a_deploy_container_that_prints_and_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = _config(tmp_path)
+    calls: list[list[str]] = []
+
+    async def fake_run(argv, env, on_line=None):
+        calls.append(list(argv))
+        return 1, ""
+
+    monkeypatch.setattr(compose, "_run", fake_run)
+    asyncio.run(compose.record_failure(config, "heldso", {"sha": "abc", "error": "no"}, ["== sync", "!! no"]))
+    argv = calls[0]
+    assert argv[argv.index("--name") + 1] == "deploy-heldso"
+    assert "--replace" in argv
+    assert "yard.error=no" in argv and "yard.sha=abc" in argv
+    assert "YARD_LOG=== sync\n!! no" in argv
+    assert argv[-3:] == ["localhost/yard-apply", "-c", 'printf "%s\\n" "$YARD_LOG"; exit 1']
+
+
+def test_record_failure_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    async def broken(argv, env, on_line=None):
+        raise compose.YardError(502, "compose", "podman is gone")
+
+    monkeypatch.setattr(compose, "_run", broken)
+    asyncio.run(compose.record_failure(_config(tmp_path), "heldso", {}, []))

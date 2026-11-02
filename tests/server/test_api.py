@@ -890,7 +890,7 @@ async def test_page_record_is_the_record():
         env_file="/env",
         rows=[],
         hosts=[],
-        deploys=[],
+        deploy=None,
         log="",
     )
     data = page_json(page)
@@ -1099,3 +1099,29 @@ async def test_repo_token_checks_the_repo(yard):
     assert res.status_code == 502
     res = await client.post("/api/v1/repos/token", json={"repo": "https://github.com/org/heldso"})
     assert res.status_code == 401
+
+
+async def test_deploy_get_reads_the_deploy_container(yard, monkeypatch):
+    """After a restart Yard has no job; the deploy container still answers."""
+    client, token, _root = yard
+    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
+    listed = [
+        {
+            "Names": ["deploy-db"],
+            "State": "exited",
+            "ExitCode": 3,
+            "Labels": {"yard.sha": "sha256:" + "d" * 64, "yard.image": "postgres:17@x", "yard.previous": "postgres:16"},
+        }
+    ]
+
+    async def fake_run(self, *args, timeout=None):
+        return json.dumps(listed) if args[:1] == ("ps",) else "[]"
+
+    monkeypatch.setattr(Podman, "run", fake_run)
+    res = await client.get("/api/v1/apps/db/deploy", headers=auth(token))
+    deploy = res.json()["deploy"]
+    assert deploy["status"] == "reverted"
+    assert deploy["image"] == "postgres:17@x"
+    assert deploy["error"] == "unhealthy; reverted to postgres:16"
+    page = (await client.get("/api/v1/apps/db", headers=auth(token))).json()
+    assert page["deploy"]["status"] == "reverted"

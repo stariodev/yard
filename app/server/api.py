@@ -94,16 +94,15 @@ def app_json(app: App, deployed: Deployed | None = None) -> dict[str, Any]:
     }
 
 
-def page_json(page: status.Page, deployed: Deployed | None = None, job: Job | None = None) -> dict[str, Any]:
+def page_json(page: status.Page, deployed: Deployed | None = None) -> dict[str, Any]:
     return {
         "app": app_json(page.app, deployed),
-        "job": _job_json(job) if job else None,
         "image": page.image,
         "sha": page.sha,
         "env_file": page.env_file,
         "rows": [asdict(row) for row in page.rows],
         "hosts": page.hosts,
-        "deploys": page.deploys,
+        "deploy": page.deploy,
         "log": page.log,
         "template_moved": page.template_moved,
     }
@@ -174,6 +173,7 @@ async def _install(forge: Forge, config: Config) -> str:
 
 
 def _job_json(job: Job) -> dict[str, Any]:
+    """A deploy while it runs. Its end is the job's outcome, the same values the deploy container keeps."""
     outcome = job.outcome or {}
     return {
         "id": job.id,
@@ -824,7 +824,7 @@ class AppsPage:
     async def app_page(self, c: Context, w: Writer) -> None:
         page = await status.app_report(self.yard, c.match.params["name"])
         deployed = read_deployed(self.yard.config, page.app.name)
-        w.json(cast(JsonValue, page_json(page, deployed, self.yard.deploys.get(page.app.name))))
+        w.json(cast(JsonValue, page_json(page, deployed)))
 
     async def app_patch(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]
@@ -865,14 +865,16 @@ class AppsPage:
         name = c.match.params["name"]
         self.yard.store.app(name)
         job = self.yard.deploys.get(name)
-        if job is None:
-            raise YardError(
-                404,
-                "not_found",
-                "no deploy since Yard started",
-                context={"app": name},
-                help_text=f"yard app logs --deploy --app {name}",
-            )
+        if job is None or (job.status != "running" and c.req.query.get("follow") != "1"):
+            # No deploy runs: the deploy container is the record. A skipped deploy has none.
+            record = await status.last_deploy(self.yard, name)
+            if record is not None:
+                if record["status"] == "ok":
+                    record["port"] = await apps.exposed_port(self.yard, name)
+                w.json(cast(JsonValue, {"deploy": record}))
+                return
+            if job is None:
+                raise YardError(404, "not_found", f"{name} has no deploy yet", context={"app": name})
         if c.req.query.get("follow") != "1":
             body = _job_json(job)
             body["lines"] = job.lines

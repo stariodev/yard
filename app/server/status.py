@@ -61,7 +61,7 @@ class Report:
 
 @dataclass(slots=True)
 class Page:
-    """One app's page: its rows, its hosts, its recent deploys, its log tail."""
+    """One app's page: its rows, its hosts, its last deploy, its log tail."""
 
     app: App
     image: str
@@ -69,7 +69,7 @@ class Page:
     env_file: str
     rows: list[Row]
     hosts: list[str]
-    deploys: list[dict[str, Any]]
+    deploy: dict[str, Any] | None
     log: str
     template_moved: bool = False
 
@@ -142,7 +142,7 @@ async def _crashes(yard: Yard, listed: dict[str, Container]) -> dict[str, tuple[
 
 
 def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | None:
-    """The deploy container is the deploy. One row, or none."""
+    """The deploy container is the record of the last deploy: its labels and its exit code."""
     item = listed.get(deploy_container(name))
     if item is None:
         return None
@@ -150,15 +150,27 @@ def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | N
         state = "running"
     elif item.exit_code == 0:
         state = "ok"
+    elif item.exit_code == 3:
+        state = "reverted"
     else:
         state = "failed"
+    labels = item.labels
+    error = labels.get("error", "")
+    if not error and state == "failed":
+        error = f"apply exited {item.exit_code}"
+    elif not error and state == "reverted":
+        error = f"unhealthy; reverted to {labels.get('previous', '')}"
     return {
         "app": name,
-        "sha": image_sha(item.image),
-        "image": item.image,
+        "sha": labels.get("sha", ""),
+        "image": labels.get("image", ""),
         "status": state,
+        "cause": labels.get("cause", ""),
+        "actor": labels.get("actor", ""),
+        "previous": labels.get("previous", ""),
+        "error": error,
         "started": stamp(item.started) if item.started else "",
-        "ended": stamp(item.exited) if item.exited else "",
+        "ended": stamp(item.exited) if item.exited and not item.running else "",
     }
 
 
@@ -203,7 +215,7 @@ def _app_rows(
 
 
 async def app_report(yard: Yard, name: str) -> Page:
-    """The one-app page: its rows, its hosts, its recent deploys, its log tail."""
+    """The one-app page: its rows, its hosts, its last deploy, its log tail."""
     config, store, client = yard.config, yard.store, yard.podman
     app = store.app(name)
     listed = podman.parse_ps(await client.run("ps", "-a", "--format", "json"))
@@ -227,7 +239,7 @@ async def app_report(yard: Yard, name: str) -> Page:
         env_file=str(config.env(name)),
         rows=rows,
         hosts=hosts,
-        deploys=[note] if note else [],
+        deploy=note,
         log=page_log,
         template_moved=any(row.template_moved for row in rows),
     )
@@ -327,3 +339,12 @@ async def _container_tail(yard: Yard, name: str) -> str:
             return await yard.podman.run("logs", "--tail", "20", name)
         except YardError:
             return ""
+
+
+async def last_deploy(yard: Yard, name: str) -> dict[str, Any] | None:
+    """The record of the last deploy, read from its container; None before the first deploy."""
+    try:
+        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    except YardError:
+        return None
+    return deploy_record(listed, name)

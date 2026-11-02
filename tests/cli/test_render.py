@@ -99,22 +99,13 @@ def test_format_app_status():
         "env_file": "/srv/yard/env/heldso.env",
         "rows": [row],
         "hosts": ["heldso.example.com", "www.heldso.example.com"],
-        "deploys": [
-            {
-                "app": "heldso",
-                "sha": "abc1234",
-                "status": "ok",
-                "started": stamp(days=4, minutes=2),
-                "ended": stamp(days=4),
-            },
-            {
-                "app": "heldso",
-                "sha": "def5678",
-                "status": "failed",
-                "started": stamp(days=5, minutes=0, seconds=40),
-                "ended": stamp(days=5),
-            },
-        ],
+        "deploy": {
+            "app": "heldso",
+            "sha": "abc1234",
+            "status": "ok",
+            "started": stamp(days=4, minutes=2),
+            "ended": stamp(days=4),
+        },
         "log": "one\ntwo\n",
     }
     assert format_app_status(page, NOW) == (
@@ -127,9 +118,8 @@ def test_format_app_status():
         "containers\n"
         "  heldso-app  aa11bb22cc33  up 2h  1.5%  20MB\n"
         "\n"
-        "deploys\n"
-        "  ok      2m0s  4d  abc1234\n"
-        "  failed   40s  5d  def5678\n"
+        "deploy\n"
+        "  ok  2m0s  4d  abc1234\n"
         "\n"
         "log\n"
         "  one\n"
@@ -143,7 +133,7 @@ def test_format_app_status_minimal():
         "env_file": "/srv/yard/env/heldso.env",
         "rows": [{"app": "heldso", "state": "absent", "health": "down"}],
         "hosts": [],
-        "deploys": [],
+        "deploy": None,
         "log": "",
     }
     assert format_app_status(page, NOW) == (
@@ -154,8 +144,8 @@ def test_format_app_status_minimal():
         "containers\n"
         "  heldso  down\n"
         "\n"
-        "deploys\n"
-        "  no deploys yet\n"
+        "deploy\n"
+        "  no deploy yet\n"
         "\n"
         "log\n"
         "  no log\n"
@@ -252,7 +242,7 @@ def test_colored_app_status_keeps_the_padding():
         "env_file": "",
         "rows": [row],
         "hosts": [],
-        "deploys": [],
+        "deploy": None,
         "log": "",
     }
     colored = format_app_status(page, NOW, color=True)
