@@ -20,7 +20,6 @@ import pytest
 
 from app.server import sites
 from app.server.caddy import Caddy, hosts
-from app.server.caddy import hosts as caddy_hosts
 from app.shared import YardError
 from tests.server.conftest import FakeCaddy, make_yard
 
@@ -226,11 +225,8 @@ def _free_port() -> int:
 
 
 @contextlib.contextmanager
-def _caddy(autosave: dict | None = None) -> Iterator[tuple[Path, Caddy, int]]:
-    """A real Caddy on a short temp root. The main Caddyfile imports the Yard sites directory.
-
-    With `autosave`, Caddy starts with --resume from that config, as a 0.10 host does after the upgrade.
-    """
+def _caddy() -> Iterator[tuple[Path, Caddy, int]]:
+    """A real Caddy on a short temp root. The main Caddyfile imports the Yard sites directory."""
     root = Path(tempfile.mkdtemp(prefix="yc-"))
     sites_dir = root / "apps" / "yard" / "caddy" / "config" / "sites"
     sites_dir.mkdir(parents=True)
@@ -246,10 +242,6 @@ def _caddy(autosave: dict | None = None) -> Iterator[tuple[Path, Caddy, int]]:
         f"import {sites_dir}/*.caddy\n"
     )
     command = ["caddy", "run", "--config", str(main), "--adapter", "caddyfile"]
-    if autosave is not None:
-        (root / "xdg" / "caddy").mkdir(parents=True)
-        (root / "xdg" / "caddy" / "autosave.json").write_text(json.dumps(autosave))
-        command.append("--resume")
     # Caddy keeps its autosave and its data under these, never in the user's own Caddy directories.
     env = {**os.environ, "XDG_CONFIG_HOME": str(root / "xdg"), "XDG_DATA_HOME": str(root / "data")}
     # ops/compose.yml sets the same: a resumed autosave without an admin block uses it.
@@ -318,140 +310,42 @@ async def test_real_caddy_loads_checks_and_rolls_back(real_caddy: tuple[Path, Ca
     assert (await asyncio.to_thread(_get, port, "a.localhost"))[1] != "A"
 
 
-def _bind_route(host: str, dial: str, window: object = "10s") -> dict:
-    """One 0.10 bind route, as Yard wrote it through the admin API."""
-    return {
-        "@id": f"yard-{host}",
-        "match": [{"host": [host]}],
-        "handle": [
-            {
-                "handler": "reverse_proxy",
-                "load_balancing": {"try_duration": window, "try_interval": "250ms"},
-                "upstreams": [{"dial": dial}],
-            }
-        ],
-    }
+class _Down(FakeCaddy):
+    """A Caddy that answers `down` calls with a 502 first, as one that starts after Yard."""
 
-
-class _Resumed(FakeCaddy):
-    """A Caddy that resumed the 0.10 config. `down` answers that many calls with a 502 first."""
-
-    def __init__(self, routes: list, down: int = 0, refuse: str = "") -> None:
+    def __init__(self, down: int) -> None:
         super().__init__()
-        self.config = {"apps": {"http": {"servers": {"yard": {"listen": [":443"], "routes": routes}}}}}
         self.down = down
-        self.refuse_load = refuse
 
     async def request(self, method, path, body=None, content_type="application/json"):
         if self.down:
             self.down -= 1
-            raise YardError(502, "caddy", "caddy GET /config/: no socket")
-        if path == "/config/":
-            return 200, json.dumps(self.config).encode()
-        if path == "/load" and self.refuse_load:
-            raise YardError(400, "bad_caddyfile", self.refuse_load)
+            raise YardError(502, "caddy", "caddy POST /load: no socket")
         return await super().request(method, path, body, content_type)
 
 
-def _resumed_yard(tmp_path: Path, caddy: FakeCaddy):
+async def test_boot_loads_once_caddy_answers(tmp_path: Path):
     yard = make_yard(tmp_path)
-    for name in ("yard", "honorata", "bobowski-site"):
-        yard.store.create_app(name, "")
-    yard.config.caddy_sites().mkdir(parents=True)
+    caddy = _Down(down=2)
     yard.caddy = caddy
-    return yard
-
-
-ROUTES = [
-    _bind_route("yard.bobowski.dev", "yard-app-1:8000"),
-    _bind_route("honorata.cc", "honorata-app-1:8000"),
-    _bind_route("www.honorata.cc", "honorata-app-1:8000"),
-    _bind_route("bobowski.dev", "bobowski-site-app-1:8000", 30_000_000_000),
-    _bind_route("gone.example.com", "gone-app-1:8000"),
-    {"match": [{"host": ["by-hand.example.com"]}], "handle": []},
-]
-
-
-async def test_boot_imports_the_binds_once(tmp_path: Path):
-    caddy = _Resumed(ROUTES, down=2)
-    yard = _resumed_yard(tmp_path, caddy)
     await sites.boot(yard, pause=0)
-
-    assert sorted(path.name for path in yard.config.caddy_sites().iterdir()) == [
-        "bobowski-site.caddy",
-        "honorata.caddy",
-        "yard.caddy",
-    ]
-    assert sites.get_site(yard, "honorata") == (
-        "honorata.cc, www.honorata.cc {\n"
-        "\treverse_proxy honorata-app-1:8000 {\n"
-        "\t\tlb_try_duration 10s\n"
-        "\t\tlb_try_interval 250ms\n"
-        "\t}\n"
-        "}\n"
-    )
-    assert "lb_try_duration 30s" in sites.get_site(yard, "bobowski-site")
     assert caddy.loads == 1
-
-    # The files are the state now: a second boot loads them and imports nothing.
-    yard.config.site("honorata").write_text("honorata.cc {\n}\n")
-    await sites.boot(yard, pause=0)
-    assert sites.get_site(yard, "honorata") == "honorata.cc {\n}\n"
-    assert caddy.loads == 2
-
-
-async def test_boot_removes_the_import_when_caddy_refuses_it(tmp_path: Path):
-    yard = _resumed_yard(tmp_path, _Resumed(ROUTES, refuse="ambiguous site definition: honorata.cc"))
-    await sites.boot(yard, pause=0)
-    assert list(yard.config.caddy_sites().iterdir()) == []
 
 
 async def test_boot_gives_up_when_caddy_never_answers(tmp_path: Path):
-    caddy = _Resumed(ROUTES, down=10)
-    yard = _resumed_yard(tmp_path, caddy)
+    yard = make_yard(tmp_path)
+    caddy = _Down(down=10)
+    yard.caddy = caddy
     await sites.boot(yard, tries=3, pause=0)
-    assert list(yard.config.caddy_sites().iterdir()) == []
-    assert caddy.down == 7
+    assert caddy.down == 7 and caddy.loads == 0
 
 
-@pytest.mark.skipif(shutil.which("caddy") is None, reason="needs the caddy binary")
-async def test_real_caddy_moves_from_the_binds_with_no_gap():
-    port = _free_port()
-    old = {
-        "apps": {
-            "http": {
-                "servers": {
-                    "yard": {
-                        "listen": [f":{port}"],
-                        "automatic_https": {"disable": True},
-                        "routes": [
-                            {
-                                "@id": "yard-a.localhost",
-                                "match": [{"host": ["a.localhost"]}],
-                                "handle": [{"handler": "static_response", "body": "OLD"}],
-                            },
-                            _bind_route("b.localhost", "heldso-app-1:8000"),
-                        ],
-                    }
-                }
-            }
-        }
-    }
-    with _caddy(autosave=old) as (root, client, _site_port):
-        yard = make_yard(root)
-        yard.store.create_app("heldso", "")
-        yard.config = replace(yard.config, caddyfile=root / "Caddyfile")
-        yard.caddy = client
-        # Before Yard boots, the resumed Caddy still serves the 0.10 routes.
-        assert await asyncio.to_thread(_get, port, "a.localhost") == (200, "OLD")
-
-        await sites.boot(yard, pause=0)
-        assert sites.get_site(yard, "heldso").startswith("b.localhost {\n\treverse_proxy heldso-app-1:8000 {")
-        live = json.loads((await client.request("GET", "/config/"))[1])
-        assert list(live["apps"]["http"]["servers"]) == ["srv0"]
-        assert caddy_hosts(live) == ["b.localhost"]
-        saved = json.loads((root / "xdg" / "caddy" / "autosave.json").read_text())
-        assert caddy_hosts(saved) == ["b.localhost"]
+async def test_boot_stops_when_caddy_refuses_the_files(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    caddy = FakeCaddy(refuse="ambiguous site definition: honorata.cc")
+    yard.caddy = caddy
+    await sites.boot(yard, pause=0)
+    assert [path for _method, path, _body in caddy.calls] == ["/load"]
 
 
 async def test_list_hosts_adapts_each_file_once(tmp_path: Path):
