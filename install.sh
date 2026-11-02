@@ -129,7 +129,7 @@ ensure_dir "$root/apps/yard/caddy"
 ensure_dir "$root/apps/yard/caddy/config"
 ensure_dir "$root/apps/yard/caddy/data"
 ensure_dir "$root/apps/yard/caddy/run"
-ensure_dir "$root/apps/yard/caddy/sites"
+ensure_dir "$root/apps/yard/caddy/config/sites"
 install -d -o yard -g yard -m 700 "$root/apps/yard"
 
 install -d /etc/yard

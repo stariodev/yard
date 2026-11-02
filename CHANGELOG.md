@@ -2,11 +2,12 @@
 
 ## 0.11.0
 
-- Caddy reads Caddyfiles. Each app has one site file on Yard, `apps/yard/caddy/sites/<name>.caddy`. `yard caddy cat` prints it, and `yard caddy edit` opens it in `$EDITOR` or reads it from stdin. Yard loads Caddy after each save. Caddy checks the whole config first; a refused file keeps the old config, and the error names the file and the line. An empty file removes the site. A refused edit in the editor opens the editor again on the same text.
+- Caddy reads Caddyfiles. Each app has one site file on Yard, `apps/yard/caddy/config/sites/<name>.caddy`. `yard caddy cat` prints it, and `yard caddy edit` opens it in `$EDITOR` or reads it from stdin. Yard loads Caddy after each save. Caddy checks the whole config first; a refused file keeps the old config, and the error names the file and the line. An empty file removes the site. A refused edit in the editor opens the editor again on the same text.
 - `yard app new --caddy HOST` writes the default site after the first deploy: every host, comma-separated, to `<name>-app-1` on the port the container exposes. `--caddy` repeats. Without one exposed port, it prints the template and writes nothing. `--caddy` with `--no-deploy` is refused.
 - New routes: `GET /api/v1/apps/{name}/caddy` answers the site file as text (empty when there is none), and `PUT` takes the whole file as the body and answers `{"hosts"}`. A refused file is a 400 `bad_caddyfile` with Caddy's error.
 - Breaking: the binds are gone. `yard bind ls/set/rm`, `/api/v1/binds`, `yard app new --public/--try/--port`, and `yard app rm --with-binds` are removed. `yard app rm` removes the site file first, and its answer is `{"name", "hosts"}`.
-- Breaking: Caddy starts from `ops/Caddyfile` with no `--resume`; `ops/caddy.json` is gone. The site files are the only state. See the upgrade steps in the pull request that made this change.
+- Caddy starts from `ops/Caddyfile`; `ops/caddy.json` is gone. Caddy keeps `--resume`, and Yard loads the site files at every boot, so they are the state.
+- The upgrade needs no manual step. Caddy resumes the 0.10 bind routes and keeps serving. When Yard boots and finds no site file, it writes one default site for each app from those routes (the hosts, the dial, the retry window), then loads the Caddyfile. A route whose dial names no app is logged and skipped. The journal event `caddy.import` names the apps.
 - `yard env show` is `yard env cat`. New `yard env get KEY` prints one value.
 - The status table's `bind` column is `host`, and the app page has a `caddy` line. Both list the hosts from the site file. `yard status --full` has a `caddy config` row in place of `caddy routes`: Caddy adapts every site file on disk and loads nothing.
 - `yard repo new [NAME] [--owner] [--forge]` creates a private repo for the checkout, adds it as `origin`, and pushes the branch with your own git credentials. It needs a commit and no `origin` remote. It never runs `git add` or `git commit`.

@@ -69,8 +69,8 @@ class Config:
         return self.app_dir("yard") / "caddy" / "data"
 
     def caddy_sites(self) -> Path:
-        """The site files. Caddy mounts this directory read-only and imports *.caddy."""
-        return self.app_dir("yard") / "caddy" / "sites"
+        """The site files. They sit in Caddy's /config mount, and the main Caddyfile imports *.caddy."""
+        return self.app_dir("yard") / "caddy" / "config" / "sites"
 
     def site(self, name: str) -> Path:
         return self.caddy_sites() / f"{name}.caddy"

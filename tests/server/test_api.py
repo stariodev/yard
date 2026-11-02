@@ -145,7 +145,7 @@ async def test_app_delete_answers_the_site_hosts(yard, monkeypatch):
     res = await client.delete("/api/v1/apps/heldso", headers=auth(token))
     assert res.status_code == 200
     assert res.json() == {"name": "heldso", "hosts": ["heldso.example.com"]}
-    assert not (root / "apps" / "yard" / "caddy" / "sites" / "heldso.caddy").exists()
+    assert not (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").exists()
     assert fake.loads == 2
 
 
@@ -329,7 +329,7 @@ async def test_caddy_site_round_trip(yard, monkeypatch):
     res = await client.put("/api/v1/apps/heldso/caddy", content=site, headers=auth(token))
     assert res.status_code == 200
     assert res.json() == {"hosts": ["heldso.example.com", "www.heldso.example.com"]}
-    assert (root / "apps" / "yard" / "caddy" / "sites" / "heldso.caddy").read_text() == site
+    assert (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").read_text() == site
     assert ("POST", "/load", b"import /etc/caddy/Caddyfile\n") in fake.calls
 
     res = await client.get("/api/v1/apps/heldso/caddy", headers=auth(token))
@@ -337,12 +337,12 @@ async def test_caddy_site_round_trip(yard, monkeypatch):
 
     res = await client.put("/api/v1/apps/heldso/caddy", content="", headers=auth(token))
     assert res.json() == {"hosts": []}
-    assert not (root / "apps" / "yard" / "caddy" / "sites" / "heldso.caddy").exists()
+    assert not (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").exists()
 
 
 async def test_caddy_site_refusals(yard, monkeypatch):
     client, token, root = yard
-    _fake_caddy(monkeypatch, refuse="/etc/caddy/sites/heldso.caddy:2: unrecognized directive: nope")
+    _fake_caddy(monkeypatch, refuse="/config/sites/heldso.caddy:2: unrecognized directive: nope")
     res = await client.put("/api/v1/apps/nope/caddy", content="a.example.com {\n}\n", headers=auth(token))
     assert res.status_code == 404
     res = await client.post(
@@ -357,7 +357,7 @@ async def test_caddy_site_refusals(yard, monkeypatch):
     error = res.json()["error"]
     assert error["code"] == "bad_caddyfile"
     assert "heldso.caddy:2" in error["message"]
-    assert not (root / "apps" / "yard" / "caddy" / "sites" / "heldso.caddy").exists()
+    assert not (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").exists()
 
     res = await client.put("/api/v1/apps/heldso/caddy", content=b"\xff\xfe", headers=auth(token))
     assert res.json()["error"]["code"] == "bad_caddyfile"

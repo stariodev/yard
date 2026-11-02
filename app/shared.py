@@ -225,6 +225,18 @@ def _bad_trigger(text: str) -> NoReturn:
     )
 
 
+def default_site(hosts: list[str], dial: str, window: str = "10s") -> str:
+    """The default Caddy site: every host to one container. Caddy holds requests for `window` during a swap."""
+    return (
+        f"{', '.join(hosts)} {{\n"
+        f"\treverse_proxy {dial} {{\n"
+        f"\t\tlb_try_duration {window}\n"
+        "\t\tlb_try_interval 250ms\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
 def check_domain(domain: str) -> None:
     if not domain:
         return

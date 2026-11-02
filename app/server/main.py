@@ -7,7 +7,7 @@ import orjson
 import uvloop
 from stario import App, Span, json, serve
 
-from app.server import api, apps, compose
+from app.server import api, apps, compose, sites
 from app.server.store import Config, Store, ensure_admin
 from app.server.yard import Yard
 from app.shared import YardError
@@ -41,8 +41,9 @@ async def boot(yard: Yard, app: App) -> None:
     (config.root / "apps").mkdir(parents=True, exist_ok=True)
     (config.root / "tokens").mkdir(mode=0o700, parents=True, exist_ok=True)
     caddy_root = config.app_dir("yard") / "caddy"
-    for part in ("config", "data", "run", "sites"):
+    for part in ("config", "data", "run"):
         (caddy_root / part).mkdir(parents=True, exist_ok=True)
+    config.caddy_sites().mkdir(parents=True, exist_ok=True)
     for forge in yard.forges.values():
         forge.dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -54,6 +55,7 @@ async def boot(yard: Yard, app: App) -> None:
     # The apply image build pulls a base image. The server answers while that build runs.
     yard.tasks.append(app.create_task(_apply_image(yard), name="apply-image"))
     yard.tasks.append(app.create_task(apps.loop(yard), name="checks"))
+    yard.tasks.append(app.create_task(sites.boot(yard), name="caddy"))
     if config.prune_days > 0:
         yard.tasks.append(app.create_task(apps.prune_loop(yard), name="prune"))
 

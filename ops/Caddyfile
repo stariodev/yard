@@ -1,5 +1,5 @@
 # Yard's main Caddyfile. Caddy reads it at start; Yard loads it again after each site change.
-# Each app's site lives in sites/<app>.caddy. Yard writes those files; Caddy checks them.
+# Each app's site lives in /config/sites/<app>.caddy. Yard writes those files; Caddy checks them.
 {
 	admin unix//run/caddy/admin.sock
 	# Caddy listens on 443 only. The host forwards public 443 to it; port 80 stays closed.
@@ -12,4 +12,4 @@
 	}
 }
 
-import /etc/caddy/sites/*.caddy
+import /config/sites/*.caddy

@@ -45,6 +45,7 @@ from app.shared import (
     check_app_name,
     check_domain,
     check_repo,
+    default_site,
     explain,
     format_bytes,
     format_env,
@@ -543,18 +544,6 @@ def _env_draft(env: dict[str, str], path: str) -> str:
     return "\n\n".join(parts) + "\n" if parts else ""
 
 
-def default_site(hosts: list[str], container: str, port: int | str) -> str:
-    """The site that `app new --caddy` writes: every host to the app container."""
-    return (
-        f"{', '.join(hosts)} {{\n"
-        f"\treverse_proxy {container}:{port} {{\n"
-        "\t\tlb_try_duration 10s\n"
-        "\t\tlb_try_interval 250ms\n"
-        "\t}\n"
-        "}\n"
-    )
-
-
 def _write_default_site(session: Client, name: str, hosts: list[str], port: int) -> None:
     """The default site, with the container and the port that the deploy found. No port, no file."""
     if not hosts:
@@ -563,9 +552,9 @@ def _write_default_site(session: Client, name: str, hosts: list[str], port: int)
     if not port:
         print(f"Caddy has no site for {name}: {container} does not expose exactly one port.", file=sys.stderr)
         print(f"Write the site with the port the app listens on: yard caddy edit --app {name}", file=sys.stderr)
-        print(default_site(hosts, container, "PORT"), end="", file=sys.stderr)
+        print(default_site(hosts, f"{container}:PORT"), end="", file=sys.stderr)
         raise SystemExit(1)
-    _print_site_saved(name, _api(session, "PUT", _site_path(name), default_site(hosts, container, port).encode()))
+    _print_site_saved(name, _api(session, "PUT", _site_path(name), default_site(hosts, f"{container}:{port}").encode()))
 
 
 def _cmd_app_set(args: argparse.Namespace) -> None:
