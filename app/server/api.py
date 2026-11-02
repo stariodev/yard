@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 from collections.abc import Sequence
+from contextlib import aclosing
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
@@ -168,30 +169,6 @@ _EVENT_MATCHES = ["SYSLOG_IDENTIFIER=podman", "SYSLOG_IDENTIFIER=yard"]
 _YARD_TOP = {"YARD_EVENT", "YARD_APP", "YARD_CONTAINER", "YARD_ACTOR", "YARD_SHA", "YARD_STATUS"}
 
 
-def _logs_page(entries: list[dict], log_filter: LogFilter | None) -> dict[str, Any]:
-    """One page of log entries and the cursor a poller passes back as after.
-
-    The cursor is the last raw entry read, hidden ones included, so a filtered
-    poller still advances.
-    """
-    keep = (
-        [True] * len(entries)
-        if log_filter is None
-        else log_filter.select([journal.message_text(entry) for entry in entries])
-    )
-    rows = [
-        {
-            "cursor": str(entry.get("__CURSOR") or ""),
-            "container": str(entry.get("CONTAINER_NAME") or ""),
-            "time": journal.timestamp(entry),
-            "message": journal.message_text(entry),
-        }
-        for entry, shown in zip(entries, keep, strict=True)
-        if shown
-    ]
-    return {"entries": rows, "cursor": str(entries[-1].get("__CURSOR") or "") if entries else ""}
-
-
 def _container_match(given: str) -> str:
     """A name is CONTAINER_NAME; 12 or 64 hex picks the short or full id."""
     if re.fullmatch(r"[0-9a-fA-F]{64}", given):
@@ -278,13 +255,10 @@ def _deploy_row(entry: dict, when: str, app: str, container: str, event: str, la
         name, state, message = "deploy.start", "", f"deploy {app} {sha[:12]}".rstrip()
         fields = {key: given.get(key, "") for key in ("image", "runs", "kind", "cause")}
     else:
-        code = str(entry.get("PODMAN_EXIT_CODE") or "0")
-        state = {"0": "ok", "3": "reverted"}.get(code, "failed")
-        error = given.get("error", "")
-        if not error and state == "failed":
-            error = f"apply exited {code}"
-        elif not error and state == "reverted":
-            error = f"unhealthy; reverted to {given.get('previous', '')}"
+        raw_code = str(entry.get("PODMAN_EXIT_CODE") or "0")
+        code = int(raw_code) if raw_code.isdigit() else 1
+        state = status.deploy_status(code)
+        error = given.get("error", "") or status.deploy_error(code, given.get("previous", ""))
         name, message = "deploy.end", f"deploy {app} {state}"
         fields = {"image": given.get("image", ""), "previous": given.get("previous", ""), "error": error}
     row = {
@@ -357,43 +331,23 @@ async def _stream_journal(
     proc = await journal.follow(config, matches, lines=lines)
     w.headers.set("content-type", "text/plain; charset=utf-8")
     w.write_headers(200)
-    assert proc.stdout is not None
-    try:
-        if log_filter is None:
-            while raw := await proc.stdout.readline():
-                if c.disconnected:
-                    break
-                for entry in journal.entries(raw):
-                    if line := journal.format_line(entry):
-                        w.write(line.encode() + b"\n")
-                        await w.drain()
-        else:
-            held: Held[str] = Held(log_filter)
-            while True:
-                try:
-                    raw = await asyncio.wait_for(proc.stdout.readline(), 0.5)
-                except TimeoutError:
-                    raw = None
-                if raw == b"" or c.disconnected:
-                    break
-                if raw:
-                    for entry in journal.entries(raw):
-                        if not (line := journal.format_line(entry)):
-                            continue
-                        for out in held.push(line, journal.message_text(entry), time.monotonic()):
-                            w.write(out.encode() + b"\n")
-                            await w.drain()
-                # Expire on every iteration: busy output must not starve a held trace.
-                for line in held.expire(time.monotonic()):
-                    w.write(line.encode() + b"\n")
-                    await w.drain()
-            for line in held.drain():
+    held: Held[str] | None = Held(log_filter) if log_filter else None
+    async with aclosing(journal.follow_entries(proc, tick=0.5 if held else None)) as stream:
+        async for entry in stream:
+            if c.disconnected:
+                break
+            out: list[str] = []
+            if entry is not None and (line := journal.format_line(entry)):
+                out = [line] if held is None else held.push(line, journal.message_text(entry), time.monotonic())
+            if held is not None:
+                # Expire on every tick: busy output must not starve a held trace.
+                out += held.expire(time.monotonic())
+            for line in out:
                 w.write(line.encode() + b"\n")
                 await w.drain()
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
+    for line in held.drain() if held else []:
+        w.write(line.encode() + b"\n")
+        await w.drain()
     w.end()
 
 
@@ -408,20 +362,14 @@ async def _stream_events(
     proc = await journal.follow(config, _EVENT_MATCHES, lines=lines, since=since)
     w.headers.set("content-type", "application/x-ndjson")
     w.write_headers(200)
-    assert proc.stdout is not None
-    try:
-        while raw := await proc.stdout.readline():
+    async with aclosing(journal.follow_entries(proc)) as stream:
+        async for entry in stream:
             if c.disconnected:
                 break
-            for entry in journal.entries(raw):
-                row = _event_row(entry)
-                if row and _event_keeps(row, *want):
-                    w.write(json.dumps(row).encode() + b"\n")
-                    await w.drain()
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
+            row = _event_row(entry) if entry is not None else None
+            if row and _event_keeps(row, *want):
+                w.write(json.dumps(row).encode() + b"\n")
+                await w.drain()
     w.end()
 
 
@@ -484,54 +432,23 @@ class HooksPage:
         app.add(HOOK_GITHUB, self.github_hook, middleware=middleware)
 
     async def origin_hook(self, c: Context, w: Writer) -> None:
-        """An Origin event. No auth. A delivery only schedules a check.
-
-        The envelope is {"event": {"type": ..., "payload": {...}}}. Yard reads the
-        tip from the forge and never trusts the body. Always answers fast.
-        """
-        raw = await _hook_body(c, w)
-        if raw is None:
-            return
-        if not raw.strip():
-            w.empty(204)
-            return
-        try:
-            body = json.loads(raw)
-        except ValueError as exc:
-            raise YardError(400, "bad_json", "bad json", help_text="Send one JSON object.") from exc
-        self.origin.last_delivery = now()
-        event = body.get("event") if isinstance(body, dict) else None
-        kind = event.get("type") if isinstance(event, dict) else ""
-        payload = event.get("payload") if isinstance(event, dict) else {}
-        if kind == "repository.pushed" and isinstance(payload, dict):
-            repo = payload.get("repository")
-            if isinstance(repo, dict):
-                owner = repo.get("owner")
-                slug = owner.get("slug") if isinstance(owner, dict) else ""
-                name = repo.get("name") or ""
-                if slug and name:
-                    url = f"https://{self.origin.host}/{slug}/{name}"
-                    _hook_received(self.yard.config, self.origin, url, kind, c)
-                    c.app.create_task(apps.check_repo(self.yard, url))
-        elif isinstance(kind, str) and kind.startswith("installation."):
-            _hook_received(self.yard.config, self.origin, "", str(kind), c)
-            c.app.create_task(apps.check_installation(self.yard, self.origin))
-        w.empty(204)
+        """An Origin event. No signature: Yard reads the tip from the forge and never trusts the body."""
+        await self._hook(self.origin, c, w)
 
     async def github_hook(self, c: Context, w: Writer) -> None:
-        """A GitHub delivery. The signature proves it before anything runs.
+        """A GitHub delivery. X-Hub-Signature-256 is HMAC-SHA256 over the raw body with the stored
+        webhook secret; a bad or missing signature gets a 401 and nothing else happens."""
+        await self._hook(self.github, c, w)
 
-        X-Hub-Signature-256 is HMAC-SHA256 over the raw body with the webhook
-        secret the setup stored. A bad or missing signature gets a 401 and
-        nothing else happens.
-        """
+    async def _hook(self, forge: Forge, c: Context, w: Writer) -> None:
+        """A delivery only schedules a check, and the answer is always fast."""
         raw = await _hook_body(c, w)
         if raw is None:
             return
-        if not self.github.verify(raw, c.req.headers.get("x-hub-signature-256") or ""):
+        if not forge.signed(raw, c.req.headers.get(forge.signature_header) or ""):
             w.json({"error": YardError(401, "unauthorized", "bad signature").payload()}, 401)
             return
-        self.github.last_delivery = now()
+        forge.last_delivery = now()
         if not raw.strip():
             w.empty(204)
             return
@@ -539,17 +456,15 @@ class HooksPage:
             body = json.loads(raw)
         except ValueError as exc:
             raise YardError(400, "bad_json", "bad json", help_text="Send one JSON object.") from exc
-        kind = c.req.headers.get("x-github-event") or ""
-        if kind == "push" and isinstance(body, dict):
-            repo = body.get("repository")
-            full = repo.get("full_name") if isinstance(repo, dict) else ""
-            if full:
-                url = f"https://{self.github.host}/{full}"
-                _hook_received(self.yard.config, self.github, url, kind, c)
-                c.app.create_task(apps.check_repo(self.yard, url))
-        elif kind in ("installation", "installation_repositories"):
-            _hook_received(self.yard.config, self.github, "", kind, c)
-            c.app.create_task(apps.check_installation(self.yard, self.github))
+        event, action, repo = forge.delivery(
+            body if isinstance(body, dict) else {}, c.req.headers.get(forge.event_header) or ""
+        )
+        if action == "push" and repo:
+            _hook_received(self.yard.config, forge, repo, event, c)
+            c.app.create_task(apps.check_repo(self.yard, repo))
+        elif action == "installation":
+            _hook_received(self.yard.config, forge, "", event, c)
+            c.app.create_task(apps.check_installation(self.yard, forge))
         w.empty(204)
 
 
@@ -611,63 +526,26 @@ class HostPage:
         """Save a forge app once its credentials pass the forge's own check."""
         forge = self.yard.forge_named(c.match.params["name"])
         data = await json_object(c)
-        if isinstance(forge, Origin):
-            app_id = data.get("app_id", "")
-            if not isinstance(app_id, str) or not app_id:
-                raise YardError(
-                    400,
-                    "bad_json",
-                    "bad json",
-                    help_text="app_id is a string.",
-                    example='{"app_id": "app_..."}',
-                )
-            info = await forge.connect(app_id)
-            journal.send(
-                self.yard.config,
-                "forge.connect",
-                f"{forge.name} connected",
-                forge=forge.name,
-                app_id=app_id,
-                actor=_actor(c),
+        values = {key: data.get(key, "") for key in forge.connect_fields}
+        if not all(isinstance(value, str) and value for value in values.values()):
+            names = forge.connect_fields
+            listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f", and {names[-1]}"
+            raise YardError(
+                400,
+                "bad_json",
+                "bad json",
+                help_text=f"{listed} {'is a string' if len(names) == 1 else 'are strings'}.",
             )
-            app = {
-                "name": info.get(forge.name_field) or "",
-                "webhook_url": info.get("webhookUrl") or "",
-                "events": info.get("events") or [],
-            }
-        else:
-            assert isinstance(forge, GitHub)
-            app_id = data.get("app_id", "")
-            private_key = data.get("private_key", "")
-            secret = data.get("webhook_secret", "")
-            if (
-                not isinstance(app_id, str)
-                or not isinstance(private_key, str)
-                or not isinstance(secret, str)
-                or not app_id
-                or not private_key
-                or not secret
-            ):
-                raise YardError(
-                    400,
-                    "bad_json",
-                    "bad json",
-                    help_text="app_id, private_key, and webhook_secret are strings.",
-                )
-            info = await forge.connect(app_id, private_key, secret)
-            journal.send(
-                self.yard.config,
-                "forge.connect",
-                f"{forge.name} connected",
-                forge=forge.name,
-                app_id=app_id,
-                actor=_actor(c),
-            )
-            app = {
-                "name": info.get(forge.name_field) or "",
-                "slug": info.get("slug") or "",
-                "events": info.get("events") or [],
-            }
+        info = await forge.connect_with(values)
+        journal.send(
+            self.yard.config,
+            "forge.connect",
+            f"{forge.name} connected",
+            forge=forge.name,
+            app_id=values["app_id"],
+            actor=_actor(c),
+        )
+        app = forge.app_info(info)
         w.json(cast(JsonValue, {"forge": forge.summary(), "app": app}))
 
     async def repo_create(self, c: Context, w: Writer) -> None:
@@ -715,25 +593,36 @@ class HostPage:
         if query.get("follow") == "1":
             await _stream_journal(self.yard.config, c, w, [match], lines, log_filter)
             return
+        entries = await journal.read_entries(
+            self.yard.config, [match], lines=lines, since=since, until=until, after=after
+        )
+        shown = (
+            entries
+            if log_filter is None
+            else [
+                entry
+                for entry, keep in zip(
+                    entries, log_filter.select([journal.message_text(e) for e in entries]), strict=True
+                )
+                if keep
+            ]
+        )
         if "application/json" in (c.req.headers.get("accept") or ""):
-            entries = await journal.read_entries(
-                self.yard.config, [match], lines=lines, since=since, until=until, after=after
+            # The cursor is the last raw entry read, hidden ones included, so a filtered poller still advances.
+            rows = [
+                {
+                    "cursor": str(entry.get("__CURSOR") or ""),
+                    "container": str(entry.get("CONTAINER_NAME") or ""),
+                    "time": journal.timestamp(entry),
+                    "message": journal.message_text(entry),
+                }
+                for entry in shown
+            ]
+            w.json(
+                cast(JsonValue, {"entries": rows, "cursor": str(entries[-1].get("__CURSOR") or "") if entries else ""})
             )
-            w.json(cast(JsonValue, _logs_page(entries, log_filter)))
             return
-        if log_filter is None:
-            text = await journal.read(self.yard.config, [match], lines=lines, since=since, until=until, after=after)
-        else:
-            entries = await journal.read_entries(
-                self.yard.config, [match], lines=lines, since=since, until=until, after=after
-            )
-            keep = log_filter.select([journal.message_text(entry) for entry in entries])
-            text = "\n".join(
-                line
-                for entry, shown in zip(entries, keep, strict=True)
-                if shown and (line := journal.format_line(entry))
-            )
-        w.text(text if text.endswith("\n") or not text else text + "\n")
+        w.text("".join(line + "\n" for entry in shown if (line := journal.format_line(entry))))
 
     async def events_get(self, c: Context, w: Writer) -> None:
         """One merged timeline of Podman and Yard events."""

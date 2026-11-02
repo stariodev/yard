@@ -43,6 +43,11 @@ class Forge:
     delivery_headers: tuple[str, ...] = ()
     # The app's display name in a GET /app answer.
     name_field = ""
+    # The request headers that carry the event name and the signature of a delivery; "" when the body has them.
+    event_header = ""
+    signature_header = ""
+    # The fields PUT /api/v1/forges/<name> takes, in the order the help text names them.
+    connect_fields: tuple[str, ...] = ()
 
     def __init__(self, dir: Path, api: str = "") -> None:
         self.dir = dir
@@ -92,6 +97,27 @@ class Forge:
 
     def connected(self) -> bool:
         return (self.dir / _KEY).is_file() and bool(self.app_id) and bool(self.installations)
+
+    def require_connected(self) -> None:
+        if not self.connected():
+            raise YardError(502, "forge", f"{self.name} is not connected. Run yard forge setup {self.name}.")
+
+    def signed(self, body: bytes, signature: str) -> bool:
+        """True when the delivery proves where it came from. A forge with no signature trusts none of
+        the body anyway: Yard reads the tip from the forge."""
+        return True
+
+    def delivery(self, body: dict, event: str) -> tuple[str, str, str]:
+        """(event name, action, repo URL) of a webhook body. The action is push, installation, or ""."""
+        raise NotImplementedError
+
+    async def connect_with(self, values: dict[str, str]) -> dict:
+        """connect() with the connect_fields of a PUT body. Subclasses map them."""
+        raise NotImplementedError
+
+    def app_info(self, info: dict) -> dict:
+        """What a PUT answers about the app from its GET /app body. Never a key or a secret."""
+        return {"name": info.get(self.name_field) or "", "events": info.get("events") or []}
 
     def installation_for(self, repo: str) -> dict | None:
         """The installation whose account owns the repo's owner, case-insensitively.
@@ -295,6 +321,7 @@ class Origin(Forge):
     expires_field = "expiresAt"
     name_field = "displayName"
     delivery_headers = ("x-origin-delivery", "x-delivery")
+    connect_fields = ("app_id",)
     create_help = (
         "Approve the namespace:repositories:create scope for the Yard Origin app:"
         " run yard forge setup origin, or open the install link with include_granted_scopes=true."
@@ -365,6 +392,28 @@ class Origin(Forge):
             "type": "",
         }
 
+    def delivery(self, body: dict, event: str) -> tuple[str, str, str]:
+        """The envelope is {"event": {"type": ..., "payload": {...}}}."""
+        envelope = body.get("event")
+        envelope = envelope if isinstance(envelope, dict) else {}
+        kind = str(envelope.get("type") or "")
+        if kind.startswith("installation."):
+            return kind, "installation", ""
+        payload = envelope.get("payload")
+        repo = payload.get("repository") if isinstance(payload, dict) else None
+        if kind != "repository.pushed" or not isinstance(repo, dict):
+            return kind, "", ""
+        owner = repo.get("owner")
+        slug = str(owner.get("slug") or "") if isinstance(owner, dict) else ""
+        name = str(repo.get("name") or "")
+        return kind, "push", f"https://{self.host}/{slug}/{name}" if slug and name else ""
+
+    async def connect_with(self, values: dict[str, str]) -> dict:
+        return await self.connect(values["app_id"])
+
+    def app_info(self, info: dict) -> dict:
+        return {**super().app_info(info), "webhook_url": info.get("webhookUrl") or ""}
+
     async def connect(self, app_id: str) -> dict:
         """Save the app id only when GET /app answers for it and the existing key."""
         info = await self.get_app_for(app_id)
@@ -396,6 +445,9 @@ class GitHub(Forge):
     expires_field = "expires_at"
     name_field = "name"
     delivery_headers = ("x-github-delivery",)
+    event_header = "x-github-event"
+    signature_header = "x-hub-signature-256"
+    connect_fields = ("app_id", "private_key", "webhook_secret")
     create_help = (
         "In the app's GitHub settings, set Repository creation to Read and write,"
         " then accept the new permission on the installation."
@@ -514,6 +566,24 @@ class GitHub(Forge):
         )
         self._tokens = {}
         return info
+
+    def signed(self, body: bytes, signature: str) -> bool:
+        return self.verify(body, signature)
+
+    def delivery(self, body: dict, event: str) -> tuple[str, str, str]:
+        if event in ("installation", "installation_repositories"):
+            return event, "installation", ""
+        repo = body.get("repository")
+        full = str(repo.get("full_name") or "") if isinstance(repo, dict) else ""
+        if event != "push":
+            return event, "", ""
+        return event, "push", f"https://{self.host}/{full}" if full else ""
+
+    async def connect_with(self, values: dict[str, str]) -> dict:
+        return await self.connect(values["app_id"], values["private_key"], values["webhook_secret"])
+
+    def app_info(self, info: dict) -> dict:
+        return {**super().app_info(info), "slug": info.get("slug") or ""}
 
     def verify(self, body: bytes, header: str) -> bool:
         """X-Hub-Signature-256 over the raw body. No secret means no signature is good."""

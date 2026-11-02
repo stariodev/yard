@@ -9,7 +9,7 @@ A missing journald socket is not an error: the event lands on stdout instead.
 import asyncio
 import socket
 import struct
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime
 
 from stario import json
@@ -117,6 +117,29 @@ async def follow(
 ) -> asyncio.subprocess.Process:
     """The follow process. stdout yields one JSON entry per line."""
     return await _spawn(config, _argv(config, matches, lines, since=since, follow=True))
+
+
+async def follow_entries(proc: asyncio.subprocess.Process, *, tick: float | None = None) -> AsyncGenerator[dict | None]:
+    """The entries of a follow process, then None at each `tick` seconds with no new line.
+
+    The process ends when the iterator closes: wrap it in contextlib.aclosing.
+    """
+    assert proc.stdout is not None
+    try:
+        while True:
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), tick)
+            except TimeoutError:
+                yield None
+                continue
+            if not raw:
+                return
+            for entry in entries(raw):
+                yield entry
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
 
 
 def send(config: Config, event: str, message: str, *, priority: int = 6, **fields: str) -> None:
