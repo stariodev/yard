@@ -6,7 +6,6 @@ from app.cli.render import (
     _state_text,
     format_app_status,
     format_apps,
-    format_binds,
     format_doctor,
     format_status,
     format_tokens,
@@ -21,11 +20,11 @@ def test_format_status():
     lines = text.split("\n")
     assert lines[0].startswith("name")
     header = lines[0].split()
-    assert header == ["name", "state", "cpu", "mem", "data", "rev", "bind", "deploy"]
+    assert header == ["name", "state", "cpu", "mem", "data", "rev", "host", "deploy"]
     assert "heldso-app" in lines[1]
     assert "up 2h" in lines[1]
     assert "abc1234 → f00ba12" in lines[1]
-    assert "heldso.example.com → heldso:8000" in lines[1]
+    assert "heldso.example.com" in lines[1]
     assert "ok 2m0s" in lines[1]
     assert "shop-app" in lines[2]
     assert "exit 1 3h" in lines[2]
@@ -44,7 +43,7 @@ def test_format_status_drops_empty_columns():
         row["data"] = 0
         row["sha"] = ""
         row["tip"] = ""
-        row["binds"] = []
+        row["hosts"] = []
         row["deploy"] = None
     text = format_status(report, NOW)
     assert text.split("\n")[0].split() == ["name", "state", "cpu", "mem"]
@@ -99,10 +98,7 @@ def test_format_app_status():
         "sha": "abc1234",
         "env_file": "/srv/yard/env/heldso.env",
         "rows": [row],
-        "binds": [
-            {"host": "heldso.example.com", "dial": "heldso:8000"},
-            {"host": "www.heldso.example.com", "dial": "heldso:8000"},
-        ],
+        "hosts": ["heldso.example.com", "www.heldso.example.com"],
         "deploys": [
             {
                 "app": "heldso",
@@ -126,10 +122,7 @@ def test_format_app_status():
         "rev abc1234 · tip f00ba12 · image localhost/heldso:abc1234\n"
         "data 10MB · env /srv/yard/env/heldso.env\n"
         "runs  auto (not deployed yet)\n"
-        "\n"
-        "binds\n"
-        "  heldso.example.com      →  heldso:8000\n"
-        "  www.heldso.example.com  →  heldso:8000\n"
+        "caddy heldso.example.com, www.heldso.example.com\n"
         "\n"
         "containers\n"
         "  heldso-app  aa11bb22cc33  up 2h  1.5%  20MB\n"
@@ -149,7 +142,7 @@ def test_format_app_status_minimal():
         "app": {"name": "heldso", "env": {}},
         "env_file": "/srv/yard/env/heldso.env",
         "rows": [{"app": "heldso", "state": "absent", "health": "down"}],
-        "binds": [],
+        "hosts": [],
         "deploys": [],
         "log": "",
     }
@@ -184,16 +177,10 @@ def test_ago():
     assert ago("1999-01-01T00:00:00Z", now) == ""
 
 
-def test_format_status_bind_cell_groups_hosts():
+def test_format_status_host_cell_lists_the_hosts():
     report = status_report()
-    report["rows"][0]["binds"] = [
-        {"host": "heldso.example.com", "dial": "heldso:8000"},
-        {"host": "www.heldso.example.com", "dial": "heldso:8000"},
-        {"host": "api.heldso.example.com", "dial": "heldso-api:8000"},
-    ]
-    text = format_status(report, NOW)
-    line = "heldso.example.com, www.heldso.example.com → heldso:8000 · api.heldso.example.com → heldso-api:8000"
-    assert line in text
+    report["rows"][0]["hosts"] = ["heldso.example.com", "www.heldso.example.com"]
+    assert "heldso.example.com, www.heldso.example.com" in format_status(report, NOW)
 
 
 def test_format_resource_tables():
@@ -206,19 +193,6 @@ def test_format_resource_tables():
     assert apps.split("\n")[0].split() == ["app", "source", "ref", "trigger"]
     assert "org/app" in apps
     assert "manual" in apps
-
-    binds = format_binds(
-        [
-            {"host": "b.example.com", "dial": "app:8000", "state": "absent", "try": ""},
-            {"host": "a.example.com", "dial": "app:8000", "state": "up", "try": "30s"},
-        ]
-    )
-    lines = binds.split("\n")
-    assert lines[0].split() == ["host", "dial", "state", "try"]
-    assert lines[1].startswith("a.example.com")
-    assert lines[2].startswith("b.example.com")
-    plain = format_binds([{"host": "a.example.com", "dial": "app:8000", "state": "up"}])
-    assert plain.split("\n")[0].split() == ["host", "dial", "state"]
 
     tokens = format_tokens([{"name": "ada", "created": stamp(days=1)}])
     assert tokens.split("\n")[0].split()[0] == "token"
@@ -277,7 +251,7 @@ def test_colored_app_status_keeps_the_padding():
         "app": {"name": "heldso", "repo": "heldso", "ref": "main", "trigger": "", "env": {}},
         "env_file": "",
         "rows": [row],
-        "binds": [],
+        "hosts": [],
         "deploys": [],
         "log": "",
     }
@@ -357,23 +331,3 @@ def test_the_runs_line_renders_all_kinds():
 
     fresh = {"runs": ""}
     assert "runs  auto (not deployed yet)" in format_record(json.dumps(fresh))
-
-
-def test_status_bind_column_is_compact():
-    row = {
-        "container": "heldso-app-1",
-        "state": "running",
-        "started": "2026-10-05T10:00:00Z",
-        "health": "healthy",
-        "binds": [
-            {"host": "heldso.example.com", "dial": "heldso-app-1:8000"},
-            {"host": "www.heldso.example.com", "dial": "heldso-app-1"},
-            {"host": "api.heldso.example.com", "dial": "heldso-app-1:3000"},
-            {"host": "other.example.com", "dial": "other-app-1:9000"},
-        ],
-    }
-    text = format_status({"rows": [row]}, NOW)
-    bind = text.splitlines()[1]
-    assert "heldso.example.com, www.heldso.example.com" in bind
-    assert "api.heldso.example.com → :3000" in bind
-    assert "other.example.com → other-app-1:9000" in bind

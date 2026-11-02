@@ -1,18 +1,16 @@
-"""The Caddy admin API on its unix socket: one JSON request per bind change."""
+"""The Caddy admin API on its unix socket. Caddy reads, checks, and loads every Caddyfile itself."""
 
 import asyncio
 import http.client
-import re
 import socket as socketlib
 from pathlib import Path
 
 from stario import json
 
-from app.shared import APP_PORT, YardError
+from app.shared import YardError
 
-ROUTES_PATH = "/config/apps/http/servers/yard/routes"
-_DIAL_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 _TIMEOUT = 10
+_ADAPTER = "adapting config using caddyfile adapter: "
 
 
 class Caddy:
@@ -21,17 +19,67 @@ class Caddy:
     def __init__(self, socket: Path) -> None:
         self.socket = socket
 
-    async def request(self, method: str, path: str, body: bytes | None = None) -> tuple[int, bytes]:
-        """One admin call. A connection failure or a non-2xx answer is a 502."""
+    async def request(
+        self, method: str, path: str, body: bytes | None = None, content_type: str = "application/json"
+    ) -> tuple[int, bytes]:
+        """One admin call. Caddy's 400 is the caller's 400; any other failure is a 502."""
         try:
-            code, raw = await asyncio.to_thread(_round_trip, self.socket, method, path, body)
+            code, raw = await asyncio.to_thread(_round_trip, self.socket, method, path, body, content_type)
         except (OSError, http.client.HTTPException) as exc:
             raise YardError(502, "caddy", f"caddy {method} {path}: {exc}") from exc
+        if code == 400:
+            raise YardError(
+                400,
+                "bad_caddyfile",
+                _error_text(raw),
+                help_text="Caddy keeps the config it had. Fix the file and save it again.",
+            )
         if code >= 300:
             detail = raw.decode(errors="replace").strip()[:400]
-            message = f"caddy {method} {path}: {code}"
-            raise YardError(502, "caddy", f"{message} {detail}".rstrip())
+            raise YardError(502, "caddy", f"caddy {method} {path}: {code} {detail}".rstrip())
         return code, raw
+
+    async def load(self, caddyfile: Path) -> None:
+        """Caddy reads the main Caddyfile from its own disk, with every site file it imports."""
+        await self.request("POST", "/load", f"import {caddyfile}\n".encode(), "text/caddyfile")
+
+    async def adapt(self, text: str) -> dict:
+        """The JSON config for a Caddyfile text. Caddy loads nothing."""
+        _code, raw = await self.request("POST", "/adapt", text.encode(), "text/caddyfile")
+        body = json.loads(raw or b"{}")
+        result = body.get("result") if isinstance(body, dict) else None
+        return result if isinstance(result, dict) else {}
+
+
+def hosts(config: dict) -> list[str]:
+    """The host matchers of the top routes on every server, in file order."""
+    found: list[str] = []
+    servers = _dict(_dict(_dict(config.get("apps")).get("http")).get("servers"))
+    for server in servers.values():
+        for route in _list(_dict(server).get("routes")):
+            for match in _list(_dict(route).get("match")):
+                for host in _list(_dict(match).get("host")):
+                    if isinstance(host, str) and host not in found:
+                        found.append(host)
+    return found
+
+
+def _dict(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: object) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _error_text(raw: bytes) -> str:
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        body = {}
+    text = body.get("error") if isinstance(body, dict) else None
+    text = text if isinstance(text, str) and text else raw.decode(errors="replace").strip()
+    return text.removeprefix(_ADAPTER)[:1000] or "caddy refused the config"
 
 
 class _Connection(http.client.HTTPConnection):
@@ -47,120 +95,11 @@ class _Connection(http.client.HTTPConnection):
         self.sock.connect(self.socket_path)
 
 
-def _round_trip(socket: Path, method: str, path: str, body: bytes | None) -> tuple[int, bytes]:
+def _round_trip(socket: Path, method: str, path: str, body: bytes | None, content_type: str) -> tuple[int, bytes]:
     conn = _Connection(socket)
     try:
-        conn.request(method, path, body=body, headers={"content-type": "application/json"} if body else {})
+        conn.request(method, path, body=body, headers={"content-type": content_type} if body else {})
         with conn.getresponse() as response:
             return response.status, response.read()
     finally:
         conn.close()
-
-
-def route_id(host: str) -> str:
-    return f"yard-{host}"
-
-
-def normalize_dial(text: str) -> str:
-    """A container dial. A bare name uses port 8000."""
-    raw = text.strip()
-    for prefix in ("http://", "https://"):
-        if raw.startswith(prefix):
-            raw = raw[len(prefix) :]
-    raw = raw.split("/", 1)[0]
-    host, sep, port = raw.rpartition(":")
-    if not sep:
-        host, port = raw, str(APP_PORT)
-    if not _DIAL_HOST.fullmatch(host) or not port.isdigit() or not 1 <= int(port) <= 65535:
-        raise YardError(
-            400,
-            "bad_dial",
-            "dial must be a container name or name:port",
-            context={"dial": text},
-            help_text="Use the container name. Add :port when it is not 8000.",
-            example="heldso-app-1:8000",
-        )
-    return f"{host}:{port}"
-
-
-def proxy_route(host: str, dial: str, window: str = "10s") -> dict[str, object]:
-    """One site. The id is the host, so a second write replaces this route only."""
-    return {
-        "@id": route_id(host),
-        "handle": [
-            {
-                "handler": "reverse_proxy",
-                "load_balancing": {"try_duration": window, "try_interval": "250ms"},
-                "upstreams": [{"dial": dial}],
-            }
-        ],
-        "match": [{"host": [host]}],
-    }
-
-
-def read_routes(raw: bytes | str) -> list[dict[str, str]]:
-    """The yard server's route array as (host, dial, id, try) rows."""
-    text = raw.decode() if isinstance(raw, bytes) else raw
-    try:
-        rows = json.loads(text or "[]")
-    except ValueError:
-        return []
-    if not isinstance(rows, list):
-        return []
-    found: list[dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        host = _match_host(row)
-        if not host:
-            continue
-        ident = row.get("@id")
-        found.append(
-            {
-                "host": host,
-                "dial": _dial(row),
-                "id": ident if isinstance(ident, str) else "",
-                "try": _window(row),
-            }
-        )
-    return found
-
-
-def _match_host(row: dict[str, object]) -> str:
-    match = row.get("match")
-    if not isinstance(match, list) or not match or not isinstance(match[0], dict):
-        return ""
-    names = match[0].get("host")
-    if isinstance(names, list) and names:
-        return str(names[0])
-    return ""
-
-
-def _window(row: dict[str, object]) -> str:
-    handle = row.get("handle")
-    if not isinstance(handle, list):
-        return ""
-    for item in handle:
-        if not isinstance(item, dict):
-            continue
-        balancing = item.get("load_balancing")
-        if isinstance(balancing, dict):
-            window = balancing.get("try_duration")
-        else:
-            window = item.get("lb_try_duration")
-        if isinstance(window, str) and window:
-            return window
-    return ""
-
-
-def _dial(row: dict[str, object]) -> str:
-    handle = row.get("handle")
-    if not isinstance(handle, list):
-        return ""
-    for item in handle:
-        if not isinstance(item, dict):
-            continue
-        upstreams = item.get("upstreams")
-        if isinstance(upstreams, list) and upstreams and isinstance(upstreams[0], dict):
-            return str(upstreams[0].get("dial") or "")
-    return ""

@@ -107,11 +107,7 @@ def explain(text: str) -> str:
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _DOMAIN = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
 _REPO_PART = re.compile(r"[A-Za-z0-9._-]+")
-_WINDOW = re.compile(r"^\d+(?:ms|s|m|h)$")
 _PLAIN_VALUE = re.compile(r"[A-Za-z0-9@%_+=:,./-]+")
-
-# The app container's listen port. Stario binds it; Caddy dials it.
-APP_PORT = 8000
 
 # The git forges Yard knows: Cursor Origin and GitHub. A repo is https://<host>/<owner>/<name>.
 FORGE_HOSTS = ("origin.cursor.com", "github.com")
@@ -229,6 +225,18 @@ def _bad_trigger(text: str) -> NoReturn:
     )
 
 
+def default_site(hosts: list[str], dial: str, window: str = "10s") -> str:
+    """The default Caddy site: every host to one container. Caddy holds requests for `window` during a swap."""
+    return (
+        f"{', '.join(hosts)} {{\n"
+        f"\treverse_proxy {dial} {{\n"
+        f"\t\tlb_try_duration {window}\n"
+        "\t\tlb_try_interval 250ms\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
 def check_domain(domain: str) -> None:
     if not domain:
         return
@@ -241,21 +249,6 @@ def check_domain(domain: str) -> None:
             help_text="Use a lowercase hostname.",
             example="heldso.example.com",
         )
-
-
-def check_window(text: str) -> str:
-    """A caddy retry duration: a number and ms, s, m, or h."""
-    window = text.strip() or "10s"
-    if _WINDOW.fullmatch(window):
-        return window
-    raise YardError(
-        400,
-        "bad_window",
-        "try must be a duration",
-        context={"try": text},
-        help_text="Use a number and ms, s, m, or h.",
-        example="10s",
-    )
 
 
 def check_build_path(text: str) -> str:

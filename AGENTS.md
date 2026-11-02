@@ -52,19 +52,21 @@ Install is `.cursor/cloud-install.sh`. Prove a change with `TestClient`. Do not 
 
 ## This app
 
-Yard is a Stario JSON API plus the `yard` command line (the PyPI name is `staryard`). It builds app Containerfiles, runs the containers through Podman, and writes the Caddy config. The Yard app name is `yard`.
+Yard is a Stario JSON API plus the `yard` command line (the PyPI name is `staryard`). It builds app Containerfiles, runs the containers through Podman, and stores the Caddy site file of each app. The Yard app name is `yard`.
 
 There is no `app/features/`; three layers carry the code:
 
 - `app/shared.py` — errors, values, time helpers, and `atomic_write`. Stdlib only.
 - `app/cli/` — the `yard` command. `main.py` holds the argument tree, the HTTP client, the checkout deduction, and the commands; `render.py` holds the tables. Stdlib only; it talks to the API over HTTP.
-- `app/server/` — the API. `api.py` owns HTTP parsing and JSON; api.py holds Route values and page classes (`HooksPage`, `HostPage`, `AppsPage`, `AccessPage`), and `register(app, yard)` wires them; the services (`apps`, `binds`, `status`, `doctor`) return dataclasses; the adapters (`git`, `podman`, `caddy`, `compose`, `forges`, `journal`, `store`) wrap one tool each. `forges.py` is Origin and GitHub behind one `Forge` class. `yard.py` holds the dependencies and runtime state only. `main.py` is the composition root. Forge setup is not a service: it lives in the CLI (`yard forge setup`).
+- `app/server/` — the API. `api.py` owns HTTP parsing and JSON; api.py holds Route values and page classes (`HooksPage`, `HostPage`, `AppsPage`, `AccessPage`), and `register(app, yard)` wires them; the services (`apps`, `sites`, `status`, `doctor`) return dataclasses; the adapters (`git`, `podman`, `caddy`, `compose`, `forges`, `journal`, `store`) wrap one tool each. `forges.py` is Origin and GitHub behind one `Forge` class. `yard.py` holds the dependencies and runtime state only. `main.py` is the composition root. Forge setup is not a service: it lives in the CLI (`yard forge setup`).
 
 Imports go one way: api → services → yard/store/adapters → shared. Only `app.server.main` imports `app.server.api`. `app.cli` never imports `app.server`, `stario`, or `cryptography`. `tests/test_layers.py` enforces it. HTTP tests use `TestClient(bootstrap)` from `app.server.main`; service tests build a `Yard` with fake adapters.
 
 Run the server with `python -m app.server.main`.
 
 `Config.from_env` reads `YARD_ROOT` (default `yard-data`), `YARD_PODMAN_SOCK`, `YARD_PODMAN_BIN`, `YARD_SKIP_DEPLOY`, `YARD_BOOT`, `YARD_CHECK_SECONDS`, `YARD_PRUNE_DAYS`, `YARD_JOURNAL_DIR`, `YARD_JOURNALCTL_BIN`, `YARD_JOURNAL_SOCKET`, and `CONTAINER_HOST`. App state lives under `YARD_ROOT/apps/<name>/`.
+
+Caddy reads `ops/Caddyfile`, which imports `/config/sites/*.caddy`. That directory is `apps/yard/caddy/config/sites/` on the host, inside the `/config` mount Caddy already has; Caddy sees no env file and no data. Each app has one site file, `<name>.caddy`. Yard stores the text and never parses it. A change writes the file, then posts `import /etc/caddy/Caddyfile` to the admin `/load`; when Caddy answers 400, Yard writes the old file back and returns Caddy's error. A deploy does not touch Caddy. Caddy runs with `--resume`, so a restart serves the last loaded config; Yard loads the Caddyfile again at boot (`sites.boot`). With no site file at all, that boot first writes one default site for each app from the 0.10 bind routes that Caddy resumed (`_import_binds`).
 
 The `journal` adapter works both ways: `send` writes a Yard event to the journald native socket (stdout JSON when the socket is missing), and `read`/`follow` run journalctl. No event field may carry a secret — an env change logs key names only.
 

@@ -16,7 +16,7 @@ def format_status(report: dict, now: datetime, *, color: bool = False) -> str:
     cells = [_status_cells(row, now) for row in rows]
     headers = ["name", "state", "cpu", "mem"]
     indexes = [0, 1, 2, 3]
-    for index, header in ((4, "data"), (5, "rev"), (6, "bind"), (7, "deploy")):
+    for index, header in ((4, "data"), (5, "rev"), (6, "host"), (7, "deploy")):
         if any(cell[index] for cell in cells):
             headers.append(header)
             indexes.append(index)
@@ -46,7 +46,7 @@ def _status_cells(row: dict, now: datetime) -> list[str]:
         mem,
         format_bytes(int(row.get("data") or 0)) if row.get("data") else "",
         _rev(str(row.get("sha") or ""), str(row.get("tip") or "")),
-        _bind_text(row.get("binds"), str(row.get("container") or "")),
+        ", ".join(str(host) for host in row.get("hosts") or []),
         _deploy_text(row.get("deploy")),
     ]
 
@@ -77,34 +77,6 @@ def _state_text(row: dict, now: datetime) -> str:
             text += f" · {restarts} restart" + ("s" if restarts != 1 else "")
         return text
     return state
-
-
-def _bind_text(binds: Any, container: str = "") -> str:
-    """Hosts that share a dial stay in one phrase. The row's own container is elided."""
-    if not isinstance(binds, list):
-        return ""
-    groups: dict[str, list[str]] = {}
-    order: list[str] = []
-    for row in binds:
-        if not isinstance(row, dict):
-            continue
-        host = str(row.get("host") or "")
-        dial = str(row.get("dial") or "")
-        if not host:
-            continue
-        if container and (dial == container or dial == f"{container}:8000"):
-            dial = ""
-        elif container and dial.startswith(f"{container}:"):
-            dial = dial.removeprefix(container)
-        if dial not in groups:
-            groups[dial] = []
-            order.append(dial)
-        groups[dial].append(host)
-    parts = []
-    for dial in order:
-        hosts = ", ".join(groups[dial])
-        parts.append(f"{hosts} → {dial}" if dial else hosts)
-    return " · ".join(parts)
 
 
 def _short(sha: str) -> str:
@@ -197,13 +169,9 @@ def format_app_status(report: dict, now: datetime, *, color: bool = False) -> st
     lines.append(f"data {format_bytes(data)} · env {report.get('env_file') or ''}")
     lines.append(f"runs  {_runs_text(record)}")
 
-    binds = [row for row in report.get("binds") or [] if isinstance(row, dict) and row.get("host")]
-    if binds:
-        shown = _align(
-            [[str(row.get("host") or ""), "→", str(row.get("dial") or "")] for row in binds],
-            set(),
-        )
-        lines += ["", "binds"] + [f"  {line}" for line in shown]
+    hosts = [str(host) for host in report.get("hosts") or []]
+    if hosts:
+        lines.append(f"caddy {', '.join(hosts)}")
 
     # The id column shows only when a row carries one.
     has_id = any(row.get("id") for row in rows)
@@ -339,31 +307,6 @@ def format_forges(rows: list, *, color: bool = False) -> str:
         if isinstance(row, dict)
     ]
     return _render(["forge", "connected", "app", "installation", "selection", "delivery"], body, color=color)
-
-
-def format_binds(rows: list, *, color: bool = False) -> str:
-    body = [
-        [
-            str(row.get("host") or ""),
-            str(row.get("dial") or ""),
-            str(row.get("state") or ""),
-            str(row.get("try") or ""),
-        ]
-        for row in rows
-        if isinstance(row, dict)
-    ]
-    body.sort(key=lambda cells: cells[0])
-    headers = ["host", "dial", "state"]
-    indexes = [0, 1, 2]
-    if any(cells[3] for cells in body):
-        headers.append("try")
-        indexes.append(3)
-    return _render(
-        headers,
-        [[cells[i] for i in indexes] for cells in body],
-        color=color,
-        paint=partial(_paint, state=2),
-    )
 
 
 def format_tokens(rows: list, *, color: bool = False) -> str:

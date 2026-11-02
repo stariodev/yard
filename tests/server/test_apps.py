@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.server import apps, binds, compose, git, journal, sources
+from app.server import apps, compose, git, journal, sources
 from app.server.forges import Forge, GitHub, Origin
 from app.server.podman import Podman
 from app.server.store import Config, Deployed, Store, read_deployed
@@ -398,11 +398,11 @@ PS_HELDSO = (
 )
 
 
-def _delete_yard(tmp_path: Path, *, routes: list[dict] | None = None, ps: str = "[]") -> tuple[Yard, FakeCaddy]:
+def _delete_yard(tmp_path: Path, *, ps: str = "[]") -> tuple[Yard, FakeCaddy]:
     yard = make_yard(tmp_path)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     yard.podman = _Podman(ps=ps)
-    caddy = FakeCaddy(routes if routes is not None else [])
+    caddy = FakeCaddy()
     yard.caddy = caddy
     return yard, caddy
 
@@ -416,38 +416,28 @@ async def test_delete_refuses_the_yard_app(tmp_path: Path):
     assert caught.value.code == "forbidden"
 
 
-async def test_delete_reports_the_binds_it_leaves(tmp_path: Path):
-    yard, caddy = _delete_yard(tmp_path, routes=[_route("heldso.example.com", "heldso-app-1:8000")], ps=PS_HELDSO)
+async def test_delete_removes_the_site_first(tmp_path: Path):
+    yard, caddy = _delete_yard(tmp_path, ps=PS_HELDSO)
+    yard.config.site("heldso").parent.mkdir(parents=True)
+    yard.config.site("heldso").write_text("heldso.example.com {\n}\n")
+    yard.config.site("other").write_text("other.example.com {\n}\n")
     removed = await apps.delete(yard, "heldso")
     assert removed.name == "heldso"
-    assert removed.binds_left == [("heldso.example.com", "heldso-app-1:8000")]
-    assert len(caddy.routes) == 1
+    assert removed.hosts == ["heldso.example.com"]
+    assert removed.caddy_error == ""
+    assert not yard.config.site("heldso").exists()
+    assert yard.config.site("other").exists()
+    assert caddy.loads == 1
 
 
-async def test_delete_with_binds_removes_them(tmp_path: Path):
-    yard, caddy = _delete_yard(
-        tmp_path,
-        routes=[
-            _route("heldso.example.com", "heldso-app-1:8000"),
-            _route("other.example.com", "other-app-1:8000"),
-        ],
-        ps=PS_HELDSO,
-    )
-    removed = await apps.delete(yard, "heldso", with_binds=True)
-    assert removed.binds_removed == [("heldso.example.com", "heldso-app-1:8000")]
-    assert [row["match"][0]["host"][0] for row in caddy.routes] == ["other.example.com"]
-
-
-async def test_delete_keeps_going_when_the_binds_are_unreadable(tmp_path: Path):
+async def test_delete_keeps_going_when_caddy_refuses(tmp_path: Path):
     yard, _caddy = _delete_yard(tmp_path, ps=PS_HELDSO)
-
-    class _Down(FakeCaddy):
-        async def request(self, method, path, body=None):
-            raise YardError(502, "caddy", "caddy GET /config: no socket")
-
-    yard.caddy = _Down()
+    yard.config.site("heldso").parent.mkdir(parents=True)
+    yard.config.site("heldso").write_text("heldso.example.com {\n}\n")
+    yard.caddy = FakeCaddy(refuse="caddy POST /load: no socket")
     removed = await apps.delete(yard, "heldso")
-    assert "no socket" in removed.binds_error
+    assert "no socket" in removed.caddy_error
+    assert yard.store.list_apps() == []
 
 
 async def test_delete_purges_from_the_deployed_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -458,18 +448,9 @@ async def test_delete_purges_from_the_deployed_file(tmp_path: Path, monkeypatch:
     write_deployed(yard.config, "db", Deployed(revision="sha256:" + "a" * 64, runs="postgres:17", kind="image"))
     recorder = _Apply()
     monkeypatch.setattr(compose, "apply", recorder)
-    monkeypatch.setattr(binds, "read", lambda yard: asyncio.sleep(0, result=[]))
     await apps.delete(yard, "db")
     assert recorder.calls and recorder.calls[0]["command"] == "purge"
     assert recorder.calls[0]["project"].files == [compose.APP_COMPOSE]
-
-
-def _route(host: str, dial: str) -> dict:
-    return {
-        "@id": f"yard-{host}",
-        "match": [{"host": [host]}],
-        "handle": [{"upstreams": [{"dial": dial}]}],
-    }
 
 
 class _Podman(Podman):

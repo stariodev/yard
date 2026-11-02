@@ -22,9 +22,11 @@ yard login --url https://yard.example.com --token <token>
 yard forge setup github          # or: yard forge setup origin
 
 cd my-app
-yard app new --public app.example.com
+yard app new --caddy app.example.com
 git push
 ```
+
+`--caddy` writes the Caddy site for the app after the first deploy. `yard caddy edit` changes it later: add a host, `basic_auth`, or `forward_auth` to a login service. Caddy checks each change before it serves it.
 
 The command is `yard`. The PyPI name is `staryard`, because `yard` is taken. Python 3.14 or newer is required.
 

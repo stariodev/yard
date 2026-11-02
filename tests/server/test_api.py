@@ -4,12 +4,13 @@ import hmac
 import json
 import stat
 
-from app.server import apps, binds, caddy
+from app.server import apps
 from app.server.caddy import Caddy
 from app.server.forges import GitHub, Origin
 from app.server.podman import Podman
 from app.shared import YardError
 from tests.conftest import auth
+from tests.server.conftest import FakeCaddy
 
 
 async def test_health(yard):
@@ -113,62 +114,39 @@ async def test_app_round_trip(yard, monkeypatch):
     assert res.status_code == 404
 
 
-async def test_app_delete_answers_the_binds_it_left(yard, monkeypatch):
-    client, token, _root = yard
+def _fake_caddy(monkeypatch, refuse: str = "") -> FakeCaddy:
+    """Every Caddy client in the app answers like FakeCaddy."""
+    fake = FakeCaddy(refuse)
+
+    async def request(self, method, path, body=None, content_type="application/json"):
+        return await fake.request(method, path, body, content_type)
+
+    monkeypatch.setattr(Caddy, "request", request)
+    return fake
+
+
+async def test_app_delete_answers_the_site_hosts(yard, monkeypatch):
+    client, token, root = yard
 
     async def fake_run(self, *args, **kw):
         return "[]"
 
-    async def fake_read(host):
-        return [binds.Bind("heldso.example.com", "heldso-app-1:8000", "yard-heldso.example.com", "10s")]
-
     monkeypatch.setattr(Podman, "run", fake_run)
-    monkeypatch.setattr(binds, "read", fake_read)
+    fake = _fake_caddy(monkeypatch)
     res = await client.post(
         "/api/v1/apps",
         json={"name": "heldso", "repo": "https://origin.cursor.com/org/heldso"},
         headers=auth(token),
     )
+    assert res.status_code == 200
+    res = await client.put("/api/v1/apps/heldso/caddy", content="heldso.example.com {\n}\n", headers=auth(token))
     assert res.status_code == 200
 
     res = await client.delete("/api/v1/apps/heldso", headers=auth(token))
     assert res.status_code == 200
-    body = res.json()
-    assert body["name"] == "heldso"
-    assert body["binds_removed"] == []
-    assert body["binds_left"] == [{"host": "heldso.example.com", "dial": "heldso-app-1:8000"}]
-    assert "binds_error" not in body
-
-
-async def test_app_delete_binds_query_removes_them(yard, monkeypatch):
-    client, token, _root = yard
-    removed: list[str] = []
-
-    async def fake_run(self, *args, **kw):
-        return "[]"
-
-    async def fake_read(host):
-        return [binds.Bind("heldso.example.com", "heldso-app-1:8000", "yard-heldso.example.com", "10s")]
-
-    async def fake_delete(yard_, host, *, actor=""):
-        removed.append(host)
-        return host
-
-    monkeypatch.setattr(Podman, "run", fake_run)
-    monkeypatch.setattr(binds, "read", fake_read)
-    monkeypatch.setattr(binds, "delete_bind", fake_delete)
-    res = await client.post(
-        "/api/v1/apps",
-        json={"name": "heldso", "repo": "https://origin.cursor.com/org/heldso"},
-        headers=auth(token),
-    )
-    assert res.status_code == 200
-
-    res = await client.delete("/api/v1/apps/heldso?binds=1", headers=auth(token))
-    assert res.status_code == 200
-    assert removed == ["heldso.example.com"]
-    assert res.json()["binds_removed"] == [{"host": "heldso.example.com", "dial": "heldso-app-1:8000"}]
-    assert res.json()["binds_left"] == []
+    assert res.json() == {"name": "heldso", "hosts": ["heldso.example.com"]}
+    assert not (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").exists()
+    assert fake.loads == 2
 
 
 async def test_app_delete_refuses_the_yard_app(yard):
@@ -334,43 +312,67 @@ async def test_prune(yard, monkeypatch):
     assert body["images"] == []
 
 
-async def test_binds_check_the_values(yard, monkeypatch):
-    client, token, _root = yard
-
-    async def fake_request(self, method, path, body=None):
-        return 200, b"[]"
-
-    monkeypatch.setattr(Caddy, "request", fake_request)
-    res = await client.get("/api/v1/binds", headers=auth(token))
+async def test_caddy_site_round_trip(yard, monkeypatch):
+    client, token, root = yard
+    fake = _fake_caddy(monkeypatch)
+    res = await client.post(
+        "/api/v1/apps",
+        json={"name": "heldso", "repo": "https://origin.cursor.com/org/heldso"},
+        headers=auth(token),
+    )
     assert res.status_code == 200
-    assert res.json() == []
 
-    res = await client.put(
-        "/api/v1/binds/NOT%20A%20HOST",
-        json={"dial": "heldso"},
+    res = await client.get("/api/v1/apps/heldso/caddy", headers=auth(token))
+    assert (res.status_code, res.text) == (200, "")
+
+    site = "heldso.example.com, www.heldso.example.com {\n\treverse_proxy heldso-app-1:8000\n}\n"
+    res = await client.put("/api/v1/apps/heldso/caddy", content=site, headers=auth(token))
+    assert res.status_code == 200
+    assert res.json() == {"hosts": ["heldso.example.com", "www.heldso.example.com"]}
+    assert (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").read_text() == site
+    assert ("POST", "/load", b"import /etc/caddy/Caddyfile\n") in fake.calls
+
+    res = await client.get("/api/v1/apps/heldso/caddy", headers=auth(token))
+    assert res.text == site
+
+    res = await client.put("/api/v1/apps/heldso/caddy", content="", headers=auth(token))
+    assert res.json() == {"hosts": []}
+    assert not (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").exists()
+
+
+async def test_caddy_site_refusals(yard, monkeypatch):
+    client, token, root = yard
+    _fake_caddy(monkeypatch, refuse="/config/sites/heldso.caddy:2: unrecognized directive: nope")
+    res = await client.put("/api/v1/apps/nope/caddy", content="a.example.com {\n}\n", headers=auth(token))
+    assert res.status_code == 404
+    res = await client.post(
+        "/api/v1/apps",
+        json={"name": "heldso", "repo": "https://origin.cursor.com/org/heldso"},
         headers=auth(token),
     )
+    assert res.status_code == 200
+
+    res = await client.put("/api/v1/apps/heldso/caddy", content="a.example.com {\n\tnope\n}\n", headers=auth(token))
     assert res.status_code == 400
-    assert res.json()["error"]["code"] == "bad_domain"
+    error = res.json()["error"]
+    assert error["code"] == "bad_caddyfile"
+    assert "heldso.caddy:2" in error["message"]
+    assert not (root / "apps" / "yard" / "caddy" / "config" / "sites" / "heldso.caddy").exists()
 
-    res = await client.put(
-        "/api/v1/binds/heldso.example.com",
-        json={"dial": "bad dial"},
-        headers=auth(token),
-    )
-    assert res.json()["error"]["code"] == "bad_dial"
-
-    res = await client.put(
-        "/api/v1/binds/heldso.example.com",
-        json={"dial": "heldso", "try": "soon"},
-        headers=auth(token),
-    )
-    assert res.json()["error"]["code"] == "bad_window"
+    res = await client.put("/api/v1/apps/heldso/caddy", content=b"\xff\xfe", headers=auth(token))
+    assert res.json()["error"]["code"] == "bad_caddyfile"
+    res = await client.put("/api/v1/apps/heldso/caddy", content="#" * (64 << 10 | 1), headers=auth(token))
+    assert res.json()["error"]["code"] == "too_large"
 
 
-async def test_binds_fail_when_caddy_is_down(yard):
+async def test_caddy_site_fails_when_caddy_is_down(yard):
     client, token, _root = yard
-    res = await client.get("/api/v1/binds", headers=auth(token))
+    await client.post(
+        "/api/v1/apps",
+        json={"name": "heldso", "repo": "https://origin.cursor.com/org/heldso"},
+        headers=auth(token),
+    )
+    res = await client.put("/api/v1/apps/heldso/caddy", content="a.example.com {\n}\n", headers=auth(token))
     assert res.status_code == 502
     assert res.json()["error"]["code"] == "caddy"
 
@@ -453,30 +455,20 @@ async def test_app_status_and_doctor(yard, monkeypatch):
         return ""
 
     monkeypatch.setattr(Podman, "run", fake_run)
-    routes = [
-        {
-            "match": [{"host": ["heldso.example.com"]}],
-            "handle": [{"upstreams": [{"dial": "heldso:8000"}]}],
-        }
-    ]
-
-    async def fake_caddy(self, method, path, body=None):
-        if path == caddy.ROUTES_PATH:
-            return 200, json.dumps(routes).encode()
-        return 200, b"{}"
-
-    monkeypatch.setattr(Caddy, "request", fake_caddy)
+    _fake_caddy(monkeypatch)
     res = await client.post(
         "/api/v1/apps",
         json={"name": "heldso", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"},
         headers=auth(token),
     )
     assert res.status_code == 200
+    res = await client.put("/api/v1/apps/heldso/caddy", content="heldso.example.com {\n}\n", headers=auth(token))
+    assert res.status_code == 200
 
     page = (await client.get("/api/v1/apps/heldso", headers=auth(token))).json()
     assert page["app"]["name"] == "heldso"
     assert "env" not in page["app"]
-    assert page["binds"] == [{"host": "heldso.example.com", "dial": "heldso:8000"}]
+    assert page["hosts"] == ["heldso.example.com"]
     assert [row["container"] for row in page["rows"]] == ["heldso-app-1"]
     assert "one" in page["log"]
     res = await client.get("/api/v1/apps/nope", headers=auth(token))
@@ -905,7 +897,7 @@ async def test_page_record_is_the_record():
         sha="abc1234",
         env_file="/env",
         rows=[],
-        binds=[],
+        hosts=[],
         deploys=[],
         log="",
     )

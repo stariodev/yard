@@ -48,12 +48,14 @@ services:
       - ${YARD_ROOT}/apps/yard/caddy/config:/config
       - ${YARD_ROOT}/apps/yard/caddy/data:/data
       - ${YARD_ROOT}/apps/yard/caddy/run:/run/caddy
-      - ${CHECKOUT}/ops/caddy.json:/etc/caddy/yard.json:ro
-    # The admin socket. A resumed autosave has no admin block, so the env wins.
+      - ${CHECKOUT}/ops/Caddyfile:/etc/caddy/Caddyfile:ro
+    # --resume starts from the last loaded config, so a restart never drops a site.
+    # A fresh host has no autosave and starts from the Caddyfile. Yard loads the Caddyfile at boot.
+    # The admin socket. A resumed 0.10 autosave has no admin block, so the env wins there.
     environment:
       CADDY_ADMIN: unix//run/caddy/admin.sock
     entrypoint: ["caddy"]
-    command: ["run", "--config", "/etc/caddy/yard.json", "--resume"]
+    command: ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--resume"]
 
 networks:
   yard:

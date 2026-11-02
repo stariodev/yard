@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from app.server import binds, compose, detect, git, journal, podman, sources
+from app.server import compose, detect, git, journal, podman, sites, sources
 from app.server.detect import Plan
 from app.server.forges import Forge
 from app.server.store import App, Config, Deployed, read_deployed, write_deployed
@@ -105,15 +105,14 @@ def update(
 
 @dataclass(slots=True)
 class Removed:
-    """What a delete did to the binds that dialed the app's containers."""
+    """What a delete did. caddy_error is set when Caddy refused the load without the site file."""
 
     name: str
-    binds_removed: list[tuple[str, str]] = field(default_factory=list)
-    binds_left: list[tuple[str, str]] = field(default_factory=list)
-    binds_error: str = ""
+    hosts: list[str] = field(default_factory=list)
+    caddy_error: str = ""
 
 
-async def delete(yard: Yard, name: str, *, with_binds: bool = False, actor: str = "") -> Removed:
+async def delete(yard: Yard, name: str, *, actor: str = "") -> Removed:
     if name == "yard":
         raise YardError(
             400,
@@ -122,21 +121,9 @@ async def delete(yard: Yard, name: str, *, with_binds: bool = False, actor: str 
             help_text="To stop Yard, run: sudo -u yard podman stop yard-app-1 on the host.",
         )
     app = yard.store.app(name)
-
-    # A bind that dials one of the app's containers points at nothing after
-    # this. Collect the names before the purge removes the containers.
-    names = {compose.app_container(name)}
-    try:
-        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
-        names |= {item.name for item in listed.values() if item.app == name}
-    except YardError:
-        pass
-    app_binds: list[binds.Bind] = []
-    binds_error = ""
-    try:
-        app_binds = [bind for bind in await binds.read(yard) if bind.dial.split(":", 1)[0] in names]
-    except YardError as exc:
-        binds_error = exc.message
+    # The site goes first, so Caddy never dials a container that is gone.
+    removed = Removed(name, hosts=await sites.list_hosts(yard, name))
+    removed.caddy_error = await sites.remove_site(yard, name, actor=actor)
 
     project = compose.saved_project(yard.config, app)
     if project is not None:
@@ -150,16 +137,6 @@ async def delete(yard: Yard, name: str, *, with_binds: bool = False, actor: str 
     if directory.exists():
         shutil.rmtree(directory)
     journal.send(yard.config, "app.delete", f"app {name} deleted", app=name, actor=actor)
-
-    removed = Removed(name, binds_error=binds_error)
-    if binds_error:
-        return removed
-    if not with_binds:
-        removed.binds_left = [(bind.host, bind.dial) for bind in app_binds]
-        return removed
-    for bind in app_binds:
-        await binds.delete_bind(yard, bind.host, actor=actor)
-        removed.binds_removed.append((bind.host, bind.dial))
     return removed
 
 

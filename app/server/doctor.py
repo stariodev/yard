@@ -11,7 +11,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from app.server import binds, compose, journal, podman, status
+from app.server import compose, journal, podman, sites, status
 from app.server.forges import Forge
 from app.server.store import Config
 from app.shared import YardError, age, duration, format_bytes, parse
@@ -43,15 +43,18 @@ async def run(yard: Yard) -> list[Check]:
     else:
         checks.append(_check("caddy", await _caddy_up(yard)))
         checks.append(_check("caddy admin", await _caddy_admin(yard)))
-        ok, detail, found = await _binds(yard)
-        checks.append(_check("caddy routes", (ok, detail)))
+        checks.append(_check("caddy config", await sites.check(yard)))
         checks.append(_check("podman journald", await _podman_journald(yard)))
         checks.append(_check("journal", await _journal(yard)))
         checks.append(_check("container logs", await _container_logs(yard)))
         checks.append(_check("yard events", _yard_events(config)))
         checks += await _healthchecks(yard)
-        hosts = [row.host for row in found]
-        yard_hosts = {row.host for row in found if _yard_dial(row.dial)}
+        hosts, yard_hosts = [], set()
+        for app in yard.store.list_apps():
+            found = await sites.list_hosts(yard, app.name)
+            hosts += [host for host in found if host not in hosts]
+            if app.name == "yard":
+                yard_hosts.update(found)
     if config.boot:
         for host in hosts:
             checks.append(_check(f"dns {host}", await _dns(host)))
@@ -192,14 +195,6 @@ async def _caddy_admin(yard: Yard) -> tuple[bool, str]:
     return True, "ok"
 
 
-async def _binds(yard: Yard) -> tuple[bool, str, list[binds.Bind]]:
-    try:
-        found = await binds.read(yard)
-    except YardError as exc:
-        return False, f"{exc}; check the caddy admin row", []
-    return True, f"{len(found)} routes", found
-
-
 async def _podman_journald(yard: Yard) -> tuple[bool, str]:
     """Podman must write container logs and engine events to the journal."""
     try:
@@ -311,11 +306,6 @@ def _prune(yard: Yard) -> tuple[bool, str, bool]:
     if not yard.last_prune:
         return True, f"{base}; not run yet", False
     return True, f"{base}; last {_ago(yard.last_prune)}, freed {format_bytes(yard.last_prune_freed)}", False
-
-
-def _yard_dial(dial: str) -> bool:
-    host = dial.split(":", 1)[0]
-    return host == "yard" or host.startswith("yard-app")
 
 
 async def _https(host: str, path: str) -> tuple[bool, str]:

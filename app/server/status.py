@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.server import binds, journal, podman
+from app.server import journal, podman, sites
 from app.server.compose import app_container
 from app.server.podman import Container, Sample
 from app.server.store import App, Config, Deployed, read_deployed
@@ -34,7 +34,7 @@ class Row:
     image: str = ""
     sha: str = ""
     tip: str = ""
-    binds: list[dict[str, str]] = field(default_factory=list)
+    hosts: list[str] = field(default_factory=list)
     trigger: str = ""
     cpu: str = ""
     mem: str = ""
@@ -62,14 +62,14 @@ class Report:
 
 @dataclass(slots=True)
 class Page:
-    """One app's page: its rows, its binds, its recent deploys, its log tail."""
+    """One app's page: its rows, its hosts, its recent deploys, its log tail."""
 
     app: App
     image: str
     sha: str
     env_file: str
     rows: list[Row]
-    binds: list[dict[str, str]]
+    hosts: list[str]
     deploys: list[dict[str, Any]]
     log: str
     template_moved: bool = False
@@ -99,15 +99,14 @@ async def report(yard: Yard, running_only: bool = False) -> Report:
         else:
             other.append(item)
 
-    bound = await _binds(yard)
     rows: list[Row] = []
     for app in apps:
         items = [item for item in grouped.pop(app.name, []) if _shows(item, app)]
         tip = yard.tips.get(app.name)
         deployed = read_deployed(config, app.name)
         note = deploy_record(listed, app.name)
-        app_binds = _binds_for(bound, app.name)
-        rows += _app_rows(config, app, items, samples, tip, deployed, note, app_binds, crashes, running_only)
+        hosts = await sites.list_hosts(yard, app.name)
+        rows += _app_rows(config, app, items, samples, tip, deployed, note, hosts, crashes, running_only)
     for name in sorted(grouped):
         for item in sorted(grouped[name], key=_age):
             if running_only and not item.running:
@@ -143,14 +142,6 @@ async def _crashes(yard: Yard, listed: dict[str, Container]) -> dict[str, tuple[
         return {}
 
 
-async def _binds(yard: Yard) -> list[binds.Bind]:
-    """The binds, or none when Caddy is not answering. Status works either way."""
-    try:
-        return await binds.read(yard)
-    except YardError:
-        return []
-
-
 def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | None:
     """The deploy container is the deploy. One row, or none."""
     item = listed.get(f"deploy-{name}")
@@ -172,18 +163,8 @@ def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | N
     }
 
 
-def _binds_for(found_rows: list[binds.Bind], name: str) -> list[dict[str, str]]:
-    """Every public name whose dial is this app or one of its containers."""
-    found: list[dict[str, str]] = []
-    for row in found_rows:
-        host = row.dial.split(":", 1)[0]
-        if host == name or host.startswith(f"{name}-"):
-            found.append({"host": row.host, "dial": row.dial})
-    return found
-
-
-def _bind_target(app: App, items: list[Container]) -> str:
-    """The app container `<name>-app-1` carries the public names."""
+def _site_target(app: App, items: list[Container]) -> str:
+    """The app container `<name>-app-1` carries the hosts of the site file."""
     want = app_container(app.name)
     return want if any(item.name == want for item in items) else ""
 
@@ -201,12 +182,12 @@ def _app_rows(
     tip: Tip | None,
     deployed: Deployed | None,
     note: dict[str, Any] | None,
-    binds: list[dict[str, str]],
+    hosts: list[str],
     crashes: dict[str, tuple[bool, str]],
     running_only: bool,
 ) -> list[Row]:
     shown = [item for item in items if not running_only or item.running]
-    target = _bind_target(app, shown)
+    target = _site_target(app, shown)
     rows: list[Row] = []
     for item in sorted(shown, key=_age):
         rows.append(
@@ -218,17 +199,17 @@ def _app_rows(
                 tip,
                 deployed,
                 note,
-                binds if item.name == target else [],
+                hosts if item.name == target else [],
                 crashes,
             )
         )
     if not items and not running_only:
-        rows.append(_row(config, None, app, None, tip, deployed, note, binds, crashes))
+        rows.append(_row(config, None, app, None, tip, deployed, note, hosts, crashes))
     return rows
 
 
 async def app_report(yard: Yard, name: str) -> Page:
-    """The one-app page: its rows, its binds, its recent deploys, its log tail."""
+    """The one-app page: its rows, its hosts, its recent deploys, its log tail."""
     config, store, client = yard.config, yard.store, yard.podman
     app = store.app(name)
     listed = podman.parse_ps(await client.run("ps", "-a", "--format", "json"))
@@ -239,10 +220,10 @@ async def app_report(yard: Yard, name: str) -> Page:
     tip = yard.tips.get(app.name)
     deployed = read_deployed(config, name)
     items = [item for item in listed.values() if item.app == name and _shows(item, app)]
-    bound = _binds_for(await _binds(yard), app.name)
+    hosts = await sites.list_hosts(yard, app.name)
     note = deploy_record(listed, name)
     crashes = await _crashes(yard, listed)
-    rows = _app_rows(config, app, items, samples, tip, deployed, note, bound, crashes, False)
+    rows = _app_rows(config, app, items, samples, tip, deployed, note, hosts, crashes, False)
     page_log = await _container_tail(yard, f"{name}-app-1")
     image = items[0].image if items else ""
     return Page(
@@ -251,7 +232,7 @@ async def app_report(yard: Yard, name: str) -> Page:
         sha=deployed.revision if deployed else image_sha(image),
         env_file=str(config.env(name)),
         rows=rows,
-        binds=bound,
+        hosts=hosts,
         deploys=[note] if note else [],
         log=page_log,
         template_moved=any(row.template_moved for row in rows),
@@ -278,7 +259,7 @@ def _row(
     tip: Tip | None,
     deployed: Deployed | None,
     note: dict[str, Any] | None,
-    binds: list[dict[str, str]],
+    hosts: list[str],
     crashes: dict[str, tuple[bool, str]],
 ) -> Row:
     """One rendered row. app None means the container has no app row behind it."""
@@ -307,7 +288,7 @@ def _row(
         sha=(deployed.revision if deployed and deployed.revision else image_sha(image)) if app else image_sha(image),
         tip=tip.revision if tip else "",
         template_moved=bool(tip and tip.template and tip.template != (deployed.template if deployed else "")),
-        binds=binds,
+        hosts=hosts,
         trigger=app.trigger if app else "",
         cpu=sample.cpu if sample else "",
         mem=sample.mem if sample else "",
