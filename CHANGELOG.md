@@ -1,10 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- The settings hint is gone. Yard no longer reads the code of an app to guess the env keys it needs, and the deploy job has no `missing_env` field. The scan missed a key read through a helper such as `require_env(name)`, and the app log already names a missing key when the app stops.
-- `yard app new --edit-env` starts the editor from a template. With no value it reads the first of `.env.example`, `.env.sample`, `.env.template`, and `env.example` at the top of the checkout. `--edit-env PATH` reads that file instead. The `-e` and `--env-file` values come first, and the template adds the keys they do not set. A key left empty in the editor is not saved, and the CLI prints the `yard env set` command for it.
-
 ## 0.11.0
 
 - `yard repo new [NAME] [--owner] [--forge]` creates a private repo for the checkout, adds it as `origin`, and pushes the branch with your own git credentials. It needs a commit and no `origin` remote. It never runs `git add` or `git commit`.
@@ -14,6 +9,9 @@
 - Commit statuses are gone. Yard no longer posts "pending" and "live" on commits, and `yard doctor` has no status row. The deploy record stays in `yard app` and the journal.
 - New GitHub setups request contents write, metadata read, and repository creation write; commit statuses are no longer requested. New Origin setups request `namespace:repositories:create`. An existing host changes the permissions in the app's settings and accepts them on the installation.
 - The install step prints "Install the app on your account and select all repositories." for both forges.
+- An installation on selected repos gives a clearer warning in `yard forge setup` and `yard doctor`: deploys work, but `yard repo new` needs all repositories. The warning links the installation settings page on GitHub.
+- The settings hint is gone. Yard no longer reads the code of an app to guess the env keys it needs, and the deploy job has no `missing_env` field. The scan missed a key read through a helper such as `require_env(name)`, and the app log already names a missing key when the app stops.
+- `yard app new --edit-env` starts the editor from a template. With no value it reads the first of `.env.example`, `.env.sample`, `.env.template`, and `env.example` at the top of the checkout. `--edit-env PATH` reads that file instead. The `-e` and `--env-file` values come first, and the template adds the keys they do not set. A key left empty in the editor is not saved, and the CLI prints the `yard env set` command for it.
 
 ## 0.10.0
 

@@ -15,7 +15,6 @@ A PR adding a detector adds the module, its template, a bases.json pin, an entry
 DETECTORS (specific before generic), and tests under tests/server/.
 """
 
-import logging
 import re
 from pathlib import Path
 
@@ -24,8 +23,6 @@ from app.server.compose import COMPOSE_NAMES, DOCKERFILES
 from app.server.detect import go, http_nu, node, python, stario
 from app.server.detect.base import Plan, Repo, _join
 from app.shared import YardError
-
-log = logging.getLogger("yard")
 
 DETECTORS = (stario, python, go, node, http_nu)
 

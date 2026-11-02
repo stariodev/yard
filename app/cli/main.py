@@ -518,12 +518,12 @@ def _new_app_env(args: argparse.Namespace, name: str) -> dict[str, str]:
         if args.edit_env is not None:
             if not sys.stdin.isatty():
                 _die("--edit-env needs a terminal. Use -e KEY=VALUE or --env-file PATH instead.")
-            env = parse_env(_edit_text(_env_draft(env, _env_template(args.edit_env))))
+            env = parse_env(_edit_text(_env_draft(env, args.edit_env)))
             empty = [key for key, value in env.items() if not value]
             if empty:
                 env = {key: value for key, value in env.items() if value}
                 print(f"These keys are empty, so they are not saved: {', '.join(empty)}", file=sys.stderr)
-                print(f"Set them: yard env set --app {name} {' '.join(f'{k}=\u2026' for k in empty)}", file=sys.stderr)
+                print(f"Set them: yard env set --app {name} {' '.join(f'{key}=…' for key in empty)}", file=sys.stderr)
     except OSError as exc:
         _die(f"cannot read {exc.filename}: {exc.strerror or exc}")
     except YardError as exc:
@@ -531,29 +531,22 @@ def _new_app_env(args: argparse.Namespace, name: str) -> dict[str, str]:
     return env
 
 
-def _env_template(path: str) -> str:
-    """The named file, or else the first env template at the top of the checkout. Empty when none."""
-    if path:
-        return Path(path).read_text()
-    top = Path(_git_out("rev-parse", "--show-toplevel") or ".")
-    for name in ENV_TEMPLATES:
-        if (top / name).is_file():
-            return (top / name).read_text()
-    return ""
+def _env_draft(env: dict[str, str], path: str) -> str:
+    """The editor text: the env, then the template lines for the keys it does not set.
 
-
-def _env_draft(env: dict[str, str], template: str) -> str:
-    """The editor text: the env as KEY=value lines, then the template lines for the keys it does not set."""
-    rest = [
+    The template is PATH, else the first of ENV_TEMPLATES at the top of the checkout, else nothing.
+    """
+    if not path:
+        top = Path(_git_out("rev-parse", "--show-toplevel") or ".")
+        path = next((str(top / name) for name in ENV_TEMPLATES if (top / name).is_file()), "")
+    template = Path(path).read_text() if path else ""
+    rest = "\n".join(
         line
         for line in template.splitlines()
         if line.lstrip().startswith("#") or line.strip().removeprefix("export ").partition("=")[0].strip() not in env
-    ]
-    while rest and not rest[0].strip():
-        rest.pop(0)
-    if not rest:
-        return format_env(env)
-    return format_env(env) + ("\n" if env else "") + "\n".join(rest) + "\n"
+    ).strip()
+    parts = [text for text in (format_env(env).strip(), rest) if text]
+    return "\n\n".join(parts) + "\n" if parts else ""
 
 
 def _maybe_bind(session, host: str, name: str, port: int, window: str) -> None:
