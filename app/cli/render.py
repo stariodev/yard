@@ -58,7 +58,7 @@ def _state_text(row: dict, now: datetime) -> str:
     if state == "absent":
         return "down"
     if state in {"exited", "dead"}:
-        age = _ago(str(row.get("exited") or ""), now)
+        age = ago(str(row.get("exited") or ""), now)
         if row.get("oom"):
             word = "OOM"
         elif code:
@@ -69,7 +69,7 @@ def _state_text(row: dict, now: datetime) -> str:
             word = "failed"
         return f"{word} {age}".rstrip()
     if state == "running":
-        age = _ago(str(row.get("started") or ""), now)
+        age = ago(str(row.get("started") or ""), now)
         word = health if health in {"unhealthy", "starting"} else "up"
         text = f"{word} {age}".rstrip()
         restarts = int(row.get("restarts") or 0)
@@ -193,18 +193,17 @@ def format_app_status(report: dict, now: datetime, *, color: bool = False) -> st
     lines += ["", "containers"] + [f"  {line}" for line in containers]
 
     deploy = report.get("deploy")
-    deploys = [deploy] if isinstance(deploy, dict) else []
     lines += ["", "deploy"]
-    if deploys:
+    if isinstance(deploy, dict):
+        started = str(deploy.get("started") or "")
         shown = _align(
             [
                 [
-                    str(row.get("status") or ""),
-                    _format_span(str(row.get("started") or ""), str(row.get("ended") or "")),
-                    _ago(str(row.get("started") or ""), now),
-                    _short(str(row.get("sha") or "")),
+                    str(deploy.get("status") or ""),
+                    _format_span(started, str(deploy.get("ended") or "")),
+                    ago(started, now),
+                    _short(str(deploy.get("sha") or "")),
                 ]
-                for row in deploys
             ],
             {1, 2},
             partial(_paint, deploy=0) if color else None,
@@ -311,12 +310,8 @@ def format_forges(rows: list, *, color: bool = False) -> str:
 
 
 def format_tokens(rows: list, *, color: bool = False) -> str:
-    return _name_when("token", rows, color=color)
-
-
-def _name_when(header: str, rows: list, *, color: bool) -> str:
     body = [[str(row.get("name") or ""), _when(str(row.get("created") or ""))] for row in rows if isinstance(row, dict)]
-    return _render([header, "when"], body, {1}, color=color)
+    return _render(["token", "when"], body, {1}, color=color)
 
 
 def format_record(body: str) -> str:
@@ -408,7 +403,7 @@ def _paint(index: int, text: str, *, state: int = -1, deploy: int = -1) -> str:
     if index == state:
         code = _attention(text.strip())
     elif index == deploy:
-        code = _deploy_attention(text.strip().split(" ", 1)[0])
+        code = deploy_attention(text.strip().split(" ", 1)[0])
     if not code:
         return text
     head = len(text) - len(text.lstrip())
@@ -425,7 +420,7 @@ def _attention(state: str) -> str:
     return ""
 
 
-def _deploy_attention(status: str) -> str:
+def deploy_attention(status: str) -> str:
     if status == "failed":
         return "31"
     if status == "running":
@@ -478,10 +473,6 @@ def _format_span(started: str, ended: str) -> str:
     if start is None or stop is None or stop <= start:
         return ""
     return duration(stop - start)
-
-
-def _ago(stamp: str, now: datetime) -> str:
-    return ago(stamp, now)
 
 
 def _when(stamp: str) -> str:
