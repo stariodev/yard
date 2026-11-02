@@ -6,11 +6,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.server import journal, podman, sites
-from app.server.compose import app_container
 from app.server.podman import Container, Sample
 from app.server.store import App, Config, Deployed, read_deployed
 from app.server.yard import Tip
-from app.shared import YardError, image_sha, stamp
+from app.shared import YardError, app_container, deploy_container, image_sha, stamp
 
 if TYPE_CHECKING:
     from app.server.yard import Yard
@@ -144,7 +143,7 @@ async def _crashes(yard: Yard, listed: dict[str, Container]) -> dict[str, tuple[
 
 def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | None:
     """The deploy container is the deploy. One row, or none."""
-    item = listed.get(f"deploy-{name}")
+    item = listed.get(deploy_container(name))
     if item is None:
         return None
     if item.running:
@@ -219,7 +218,7 @@ async def app_report(yard: Yard, name: str) -> Page:
     note = deploy_record(listed, name)
     crashes = await _crashes(yard, listed)
     rows = _app_rows(config, app, items, samples, tip, deployed, note, hosts, crashes, False)
-    page_log = await _container_tail(yard, f"{name}-app-1")
+    page_log = await _container_tail(yard, app_container(name))
     image = items[0].image if items else ""
     return Page(
         app=app,

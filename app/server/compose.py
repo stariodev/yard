@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.server.store import App, read_deployed
-from app.shared import YardError, ensure_file, short_sha
+from app.shared import YardError, deploy_container, ensure_file, short_sha
 
 if TYPE_CHECKING:
     from app.server.store import Config
@@ -34,11 +34,6 @@ class Project:
     env: dict[str, str]
 
 
-def app_container(name: str) -> str:
-    """Compose names the one app container `<project>-app-1`."""
-    return f"{name}-app-1"
-
-
 def run_env(config: Config, app: App, checkout: Path, image: str, sha: str) -> dict[str, str]:
     """The values the compose files interpolate. The same names reach the apply container as process env."""
     data = config.data(app.name)
@@ -53,7 +48,7 @@ def run_env(config: Config, app: App, checkout: Path, image: str, sha: str) -> d
     }
     if app.name == "yard":
         # ops/compose.yml binds these host paths.
-        sock = config.podman_sock or "/run/podman/podman.sock"
+        sock = config.podman_socket
         env["YARD_ROOT"] = str(config.root)
         env["YARD_PODMAN_SOCK"] = sock
         env["YARD_PODMAN_DIR"] = str(Path(sock).parent)
@@ -85,14 +80,10 @@ def project(
         files = [APP_COMPOSE]
         env["YARD_FILES"] = "1"
     elif runs.startswith("https://"):
-        files = [str(_compose_copy(config, app.name, revision))]
+        files = [str(config.compose_copy(app.name, revision))]
     else:
         files = [str(checkout / runs)]
     return Project(app.name, files, env)
-
-
-def _compose_copy(config: Config, name: str, revision: str) -> Path:
-    return config.app_dir(name) / "compose" / f"{revision[7:19]}.yml"
 
 
 def saved_project(config: Config, app: App) -> Project | None:
@@ -104,7 +95,7 @@ def saved_project(config: Config, app: App) -> Project | None:
         image = f"{deployed.runs.split('@', 1)[0]}@{deployed.revision}"
         return project(config, app, "image", "", deployed.revision, image, config.app_dir(app.name))
     if deployed.kind == "compose" and deployed.runs.startswith("https://"):
-        copy = _compose_copy(config, app.name, deployed.revision)
+        copy = config.compose_copy(app.name, deployed.revision)
         if not copy.is_file():
             return None
         image = f"compose:{deployed.revision[7:19]}"
@@ -127,10 +118,9 @@ async def apply(
     on_line: Callable[[str], None] | None = None,
 ) -> tuple[int, str]:
     """Run the apply script as one Podman container. A non-zero exit is the deploy log, not an exception."""
-    sock = config.podman_sock or "/run/podman/podman.sock"
     # The name is fixed so `podman logs deploy-<name>` is the whole deploy story.
     # --replace replaces the previous container and its log.
-    name = f"deploy-{app}"
+    name = deploy_container(app)
     argv = _podman(config) + [
         "run",
         "--replace",
@@ -139,7 +129,7 @@ async def apply(
         "--network",
         "yard",
         "-v",
-        f"{sock}:/run/podman/podman.sock",
+        f"{config.podman_socket}:/run/podman/podman.sock",
         "-v",
         f"{config.root}:{config.root}",
         "-e",
@@ -177,9 +167,8 @@ def _podman(config: Config) -> list[str]:
 
 def _process_env(config: Config) -> dict[str, str]:
     """The env the host-side podman needs to find the socket."""
-    sock = config.podman_sock or "/run/podman/podman.sock"
     env = dict(os.environ)
-    host = env.get("CONTAINER_HOST") or f"unix://{sock}"
+    host = env.get("CONTAINER_HOST") or f"unix://{config.podman_socket}"
     env["CONTAINER_HOST"] = host
     env["DOCKER_HOST"] = env.get("DOCKER_HOST") or host
     return env

@@ -56,6 +56,15 @@ class Config:
     def env(self, name: str) -> Path:
         return self.app_dir(name) / "env"
 
+    def compose_copy(self, name: str, revision: str) -> Path:
+        """The fetched compose file of a URL app, named by 12 hex of its sha256."""
+        return self.app_dir(name) / "compose" / f"{revision[7:19]}.yml"
+
+    @property
+    def podman_socket(self) -> str:
+        """The host socket the apply container mounts."""
+        return self.podman_sock or "/run/podman/podman.sock"
+
     def clone(self, name: str) -> Path:
         """The plain git clone for the app. A deploy resets it to the ref tip."""
         return self.app_dir(name) / "repo"
@@ -368,7 +377,7 @@ class Store:
         atomic_write(self._record(app.name), text)
 
     def _env(self, name: str) -> Path:
-        return self.root / "apps" / name / "env"
+        return self._record(name).with_name("env")
 
     def _write_env(self, name: str, env: dict[str, str]) -> None:
         path = self._env(name)

@@ -1,7 +1,9 @@
 """Shared values: the error shape, name and env checks, atomic writes."""
 
 import json
+import re
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from app.shared import (
     check_ref,
     check_repo,
     check_trigger,
+    default_site,
     ensure_file,
     explain,
     parse_env,
@@ -346,3 +349,12 @@ def test_image_sha_drops_the_template_suffix():
     assert image_sha("localhost/x:abcdef123456") == "abcdef123456"
     assert image_sha("postgres:17") == "17"
     assert image_sha("foo:1.2-deadbeef") == "1.2-deadbeef"
+
+
+def test_install_sh_writes_the_default_site():
+    """install.sh cannot import Python, so its printf template must print what default_site writes."""
+    script = (Path(__file__).parent.parent / "install.sh").read_text()
+    found = re.search(r"site=\"\$\(printf '([^']*)' \"\$domain\"\)\"", script)
+    assert found, "install.sh no longer writes the site with printf"
+    out = subprocess.run(["printf", found.group(1), "yard.example.com"], capture_output=True, text=True, check=True)
+    assert out.stdout == default_site(["yard.example.com"], "yard-app-1:8000")

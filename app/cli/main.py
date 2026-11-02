@@ -41,11 +41,13 @@ from app.cli.render import (
 from app.shared import (
     FORGE_HOSTS,
     YardError,
+    app_container,
     atomic_write,
     check_app_name,
     check_domain,
     check_repo,
     default_site,
+    deploy_container,
     explain,
     format_bytes,
     format_env,
@@ -549,7 +551,7 @@ def _write_default_site(session: Client, name: str, hosts: list[str], port: int)
     """The default site, with the container and the port that the deploy found. No port, no file."""
     if not hosts:
         return
-    container = f"{name}-app-1"
+    container = app_container(name)
     if not port:
         print(f"Caddy has no site for {name}: {container} does not expose exactly one port.", file=sys.stderr)
         print(f"Write the site with the port the app listens on: yard caddy edit --app {name}", file=sys.stderr)
@@ -641,7 +643,7 @@ def _cmd_app_logs(args: argparse.Namespace) -> None:
         if code != 404:
             _die(text if _json else explain(text))
         # No job since Yard started: the journald container still holds the last deploy.
-    container = args.container or (f"deploy-{name}" if args.deploy else f"{name}-app-1")
+    container = args.container or (deploy_container(name) if args.deploy else app_container(name))
     _logs(session, container, args)
 
 
