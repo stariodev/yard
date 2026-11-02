@@ -851,16 +851,6 @@ class AppsPage:
         name = c.match.params["name"]
         self.yard.store.app(name)
         data = await json_object(c)
-        if "sha" in data:
-            raise YardError(
-                400,
-                "bad_request",
-                "Yard deploys what the source says now",
-                help_text=(
-                    "To roll back, change the source: git revert and push,"
-                    " or yard app set --runs IMAGE:OLDER-TAG, or an older URL."
-                ),
-            )
         for key in data:
             raise YardError(
                 400,

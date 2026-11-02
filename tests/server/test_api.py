@@ -869,14 +869,6 @@ def write_dep(tmp_path, name, kind):
     write_deployed(_config(tmp_path), name, Deployed(revision="sha256:" + "a" * 64, runs="postgres:17", kind=kind))
 
 
-async def test_deploy_body_with_sha_is_400(yard):
-    client, token, _root = yard
-    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
-    res = await client.post("/api/v1/apps/db/deploy", json={"sha": "abc1234"}, headers=auth(token))
-    assert res.status_code == 400
-    assert "deploys what the source says" in res.text
-
-
 async def test_patch_repo_on_an_image_app_is_400(yard):
     client, token, _root = yard
     await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
@@ -929,8 +921,6 @@ async def test_deploy_is_a_job(yard):
         "port",
     }
     assert fields <= set(job)
-    res = await client.post("/api/v1/apps/db/deploy", json={"sha": "abc"}, headers=auth(token))
-    assert res.status_code == 400 and "Yard deploys what the source says now" in res.text
     res = await client.post("/api/v1/apps/db/deploy", json={"other": 1}, headers=auth(token))
     assert res.status_code == 400 and res.json()["error"]["code"] == "unknown_field"
 

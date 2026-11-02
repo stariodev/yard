@@ -601,7 +601,7 @@ def test_app_set_message(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     # A ref move on a push app points at the next check.
     main(["app", "set", "--app", "heldso", "--ref", "dev"])
     out = capsys.readouterr().out
-    assert "next check deploys it within 5 minutes" in out
+    assert "The next check deploys it. Deploy now" in out
     assert "Deploy now: yard app deploy --app heldso" in out
 
     # A trigger change does not move the code.
@@ -1797,7 +1797,7 @@ def test_app_set_runs_push_message(monkeypatch: pytest.MonkeyPatch, capsys: pyte
     _env(monkeypatch)
     main(["app", "set", "--app", "db", "--runs", "postgres:17"])
     out = capsys.readouterr().out
-    assert "The next check deploys it within 5 minutes" in out
+    assert "The next check deploys it. Deploy now" in out
 
 
 def test_app_set_runs_manual_message(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
