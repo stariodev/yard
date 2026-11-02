@@ -54,14 +54,28 @@ async def remove_site(yard: Yard, name: str, *, actor: str = "") -> str:
 
 
 async def list_hosts(yard: Yard, name: str) -> list[str]:
-    """The hosts in the app's site file, as Caddy reads them. Empty when Caddy does not answer."""
-    text = get_site(yard, name)
+    """The hosts in the app's site file, as Caddy reads them. Empty when Caddy does not answer.
+
+    Caddy adapts each file once; the answer stays until the file changes.
+    """
+    path = yard.config.site(name)
+    try:
+        info = path.stat()
+    except OSError:
+        return []
+    stamp = (info.st_mtime_ns, info.st_size)
+    cached = yard.site_hosts.get(name)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    text = path.read_text()
     if not text.strip():
         return []
     try:
-        return caddy.hosts(await yard.caddy.adapt(text))
+        hosts = caddy.hosts(await yard.caddy.adapt(text))
     except YardError:
         return []
+    yard.site_hosts[name] = (stamp, hosts)
+    return hosts
 
 
 async def check(yard: Yard) -> tuple[bool, str]:

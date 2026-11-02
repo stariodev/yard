@@ -2,7 +2,6 @@ import asyncio
 import os
 import re
 import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,7 +9,9 @@ import pytest
 
 from app.server import compose
 from app.server.compose import APP_COMPOSE, BUILD_COMPOSE, image_tag, project, run_env, saved_project
+from app.server.podman import Podman
 from app.server.store import App, Config, Deployed
+from app.shared import YardError
 from tests.server.conftest import make_config
 
 FULL = (
@@ -176,15 +177,13 @@ def test_saved_project_url_compose(tmp_path: Path):
 
 def test_apply_runs_one_podman_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = _config(tmp_path)
-    monkeypatch.delenv("DOCKER_HOST", raising=False)
-    monkeypatch.delenv("CONTAINER_HOST", raising=False)
-    calls: list[tuple[list[str], dict[str, str]]] = []
+    calls: list[list[str]] = []
 
-    async def fake_run(argv, env, on_line=None):
-        calls.append((list(argv), dict(env)))
+    async def fake_stream(self, *args, on_line=None):
+        calls.append(self._args(args))
         return 0, "== build\n"
 
-    monkeypatch.setattr(compose, "_run", fake_run)
+    monkeypatch.setattr(Podman, "stream", fake_stream)
     found = compose.Project(
         "heldso",
         ["/checkout/compose.yml"],
@@ -194,8 +193,8 @@ def test_apply_runs_one_podman_container(tmp_path: Path, monkeypatch: pytest.Mon
     code, text = asyncio.run(compose.apply(config, "heldso", "up", found))
     assert code == 0
     # A plain rm first: Podman refuses to remove a running deploy container, so a running deploy is never replaced.
-    assert calls[0][0] == ["podman", "--remote", "rm", "deploy-heldso"]
-    argv, env = calls[1]
+    assert calls[0] == ["podman", "--remote", "rm", "deploy-heldso"]
+    argv = calls[1]
     assert "--replace" not in argv
     assert argv[:12] == [
         "podman",
@@ -212,10 +211,9 @@ def test_apply_runs_one_podman_container(tmp_path: Path, monkeypatch: pytest.Mon
         "-e",
     ]
     assert "COMPOSE_FILE=/checkout/compose.yml" in argv
-    assert env["CONTAINER_HOST"] == "unix:///run/podman.sock"
 
     asyncio.run(compose.apply(config, "yard", "up", found, detach=True))
-    argv, _env = calls[-1]
+    argv = calls[-1]
     assert argv[-3:] == ["-d", "localhost/yard-apply", "up"]
 
 
@@ -275,19 +273,17 @@ def test_install_sh_and_apply_pass_the_same_env_names(tmp_path: Path, monkeypatc
     shell_names = set(re.findall(r"-e ([A-Z_]+)=", block))
 
     config = _config(tmp_path)
-    monkeypatch.delenv("DOCKER_HOST", raising=False)
-    monkeypatch.delenv("CONTAINER_HOST", raising=False)
-    calls: list[tuple[list[str], dict[str, str]]] = []
+    calls: list[list[str]] = []
 
-    async def fake_run(argv, env, on_line=None):
-        calls.append((list(argv), dict(env)))
+    async def fake_stream(self, *args, on_line=None):
+        calls.append(self._args(args))
         return 0, ""
 
-    monkeypatch.setattr(compose, "_run", fake_run)
+    monkeypatch.setattr(Podman, "stream", fake_stream)
     _checkout(tmp_path, {"ops/compose.yml": FULL}, "yard")
     found = project(config, _app("yard"), Deployed(revision="abc", runs="ops/compose.yml", kind="compose"))
     asyncio.run(compose.apply(config, "yard", "up", found))
-    argv, _env = calls[-1]
+    argv = calls[-1]
     python_names = {value.split("=", 1)[0] for flag, value in zip(argv, argv[1:], strict=False) if flag == "-e"}
     assert python_names == shell_names
 
@@ -330,25 +326,17 @@ def test_image_tag():
     assert image_tag("yard", "abc", "3f9a1c2e") == "localhost/yard:abc-3f9a1c2e"
 
 
-async def test_run_calls_on_line_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    lines = []
-    script = tmp_path / "fake.py"
-    script.write_text("import sys\nprint('one')\nprint('two')\nsys.exit(0)\n")
-    code, text = await compose._run([sys.executable, str(script)], {}, lines.append)
-    assert code == 0 and lines == ["one", "two"] and "one" in text
-
-
 def test_record_failure_runs_a_deploy_container_that_prints_and_exits_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     config = _config(tmp_path)
     calls: list[list[str]] = []
 
-    async def fake_run(argv, env, on_line=None):
-        calls.append(list(argv))
+    async def fake_stream(self, *args, on_line=None):
+        calls.append(self._args(args))
         return 1, ""
 
-    monkeypatch.setattr(compose, "_run", fake_run)
+    monkeypatch.setattr(Podman, "stream", fake_stream)
     asyncio.run(compose.record_failure(config, "heldso", {"sha": "abc", "error": "no"}, ["== sync", "!! no"]))
     assert calls[0][-2:] == ["rm", "deploy-heldso"]
     argv = calls[1]
@@ -360,8 +348,8 @@ def test_record_failure_runs_a_deploy_container_that_prints_and_exits_1(
 
 
 def test_record_failure_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    async def broken(argv, env, on_line=None):
-        raise compose.YardError(502, "compose", "podman is gone")
+    async def broken(self, *args, on_line=None):
+        raise YardError(502, "podman", "podman is gone")
 
-    monkeypatch.setattr(compose, "_run", broken)
+    monkeypatch.setattr(Podman, "stream", broken)
     asyncio.run(compose.record_failure(_config(tmp_path), "heldso", {}, []))

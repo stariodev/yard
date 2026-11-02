@@ -1,15 +1,14 @@
 """Compose projects. Yard sets the env; the apply image runs docker-compose on the files as they are."""
 
-import asyncio
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.server.podman import Podman
 from app.server.store import App, Deployed
-from app.shared import YardError, deploy_container, ensure_file, short_sha
+from app.shared import deploy_container, ensure_file, short_sha
 
 if TYPE_CHECKING:
     from app.server.store import Config
@@ -118,7 +117,7 @@ async def apply(
 ) -> tuple[int, str]:
     """Run the apply script as one Podman container. A non-zero exit is the deploy log, not an exception."""
     await _remove_record(config, app)
-    argv = _podman(config) + [
+    argv = [
         "run",
         *_record_args(app, labels or {}),
         "--network",
@@ -137,7 +136,7 @@ async def apply(
     if detach:
         argv.append("-d")
     argv += ["localhost/yard-apply", command]
-    return await _run(argv, _process_env(config), on_line=on_line)
+    return await _podman(config).stream(*argv, on_line=on_line)
 
 
 async def record_failure(config: Config, app: str, labels: dict[str, str], lines: list[str]) -> None:
@@ -147,7 +146,7 @@ async def record_failure(config: Config, app: str, labels: dict[str, str], lines
     except Exception as exc:
         log.warning("deploy record %s: %s", app, exc)
         return
-    argv = _podman(config) + [
+    argv = [
         "run",
         *_record_args(app, labels),
         "--entrypoint",
@@ -159,7 +158,7 @@ async def record_failure(config: Config, app: str, labels: dict[str, str], lines
         'printf "%s\\n" "$YARD_LOG"; exit 1',
     ]
     try:
-        await _run(argv, _process_env(config))
+        await _podman(config).stream(*argv)
     except Exception as exc:
         log.warning("deploy record %s: %s", app, exc)
 
@@ -167,12 +166,12 @@ async def record_failure(config: Config, app: str, labels: dict[str, str], lines
 async def _remove_record(config: Config, app: str) -> None:
     """Remove the last deploy container. Without -f, Podman refuses a running one: a running deploy
     container is the deploy lock, and the `run` after this then fails on the name."""
-    await _run(_podman(config) + ["rm", deploy_container(app)], _process_env(config))
+    await _podman(config).stream("rm", deploy_container(app))
 
 
 async def follow(config: Config, app: str, on_line: Callable[[str], None]) -> None:
     """Stream the log of the deploy container from its first line until it stops."""
-    await _run(_podman(config) + ["logs", "-f", deploy_container(app)], _process_env(config), on_line=on_line)
+    await _podman(config).stream("logs", "-f", deploy_container(app), on_line=on_line)
 
 
 def _record_args(app: str, labels: dict[str, str]) -> list[str]:
@@ -186,59 +185,10 @@ def _record_args(app: str, labels: dict[str, str]) -> list[str]:
 
 async def build_apply(config: Config) -> tuple[int, str]:
     """Rebuild the apply image. The layer cache makes a no-change build fast, and each yard upgrade is a new process."""
-    argv = _podman(config) + [
-        "build",
-        "-t",
-        "localhost/yard-apply",
-        "-f",
-        f"{APPLY_DIR}/Containerfile",
-        APPLY_DIR,
-    ]
-    return await _run(argv, _process_env(config))
+    return await _podman(config).stream(
+        "build", "-t", "localhost/yard-apply", "-f", f"{APPLY_DIR}/Containerfile", APPLY_DIR
+    )
 
 
-def _podman(config: Config) -> list[str]:
-    args = [config.podman_bin or "podman"]
-    if config.remote:
-        args.append("--remote")
-    return args
-
-
-def _process_env(config: Config) -> dict[str, str]:
-    """The env the host-side podman needs to find the socket."""
-    env = dict(os.environ)
-    host = env.get("CONTAINER_HOST") or f"unix://{config.podman_socket}"
-    env["CONTAINER_HOST"] = host
-    env["DOCKER_HOST"] = env.get("DOCKER_HOST") or host
-    return env
-
-
-async def _run(
-    argv: list[str],
-    env: dict[str, str],
-    on_line: Callable[[str], None] | None = None,
-) -> tuple[int, str]:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            env=env or None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            limit=16 * 1024 * 1024,
-        )
-    except FileNotFoundError as exc:
-        raise YardError(
-            502,
-            "compose",
-            f"{argv[0]} is not on PATH: {exc}",
-            help_text="The yard image ships docker-compose and podman.",
-        ) from exc
-    text = ""
-    assert proc.stdout is not None
-    while chunk := await proc.stdout.readline():
-        decoded = chunk.decode(errors="replace")
-        text += decoded
-        if on_line is not None:
-            on_line(decoded.rstrip("\n"))
-    await proc.wait()
-    return proc.returncode or 0, text
+def _podman(config: Config) -> Podman:
+    return Podman(config.podman_bin, remote=config.remote)

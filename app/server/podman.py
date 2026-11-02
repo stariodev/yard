@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -120,6 +121,32 @@ class Podman:
                 help_text="Yard talks to Podman through the socket on this host.",
             )
         return text
+
+    async def stream(self, *args: str, on_line: Callable[[str], None] | None = None) -> tuple[int, str]:
+        """Run with no timeout; stderr joins stdout, each line reaches on_line. A non-zero exit is not an error."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self._args(args),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                limit=16 * 1024 * 1024,
+            )
+        except FileNotFoundError as exc:
+            raise YardError(
+                502,
+                "podman",
+                f"podman {' '.join(args)}: {exc}",
+                help_text="The podman command has to be on PATH.",
+            ) from exc
+        lines: list[str] = []
+        assert proc.stdout is not None
+        while chunk := await proc.stdout.readline():
+            line = chunk.decode(errors="replace").rstrip("\n")
+            lines.append(line)
+            if on_line is not None:
+                on_line(line)
+        await proc.wait()
+        return proc.returncode or 0, "".join(line + "\n" for line in lines)
 
 
 def parse_info(raw: str) -> Host:

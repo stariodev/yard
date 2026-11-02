@@ -72,6 +72,8 @@ class Yard:
         self.locks: dict[str, asyncio.Lock] = {}
         # One lock for every site file write and Caddy load.
         self.sites_lock = asyncio.Lock()
+        # The hosts Caddy read from each site file, keyed by the file's (mtime_ns, size).
+        self.site_hosts: dict[str, tuple[tuple[int, int], list[str]]] = {}
         self.checked: dict[str, float] = {}
         self.queued: dict[str, Callable[[], Awaitable[object]]] = {}
         self.tasks: list[asyncio.Task[None]] = []

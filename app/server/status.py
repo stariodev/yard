@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from app.server import journal, podman, sites
 from app.server.podman import Container, Sample
-from app.server.store import App, Config, Deployed
+from app.server.store import App, Deployed
 from app.server.yard import Tip
 from app.shared import YardError, app_container, deploy_container, image_sha, parse_runs, stamp
 
@@ -102,18 +102,32 @@ class Page:
     template_moved: bool = False
 
 
-async def report(yard: Yard, running_only: bool = False) -> Report:
-    config, store, client = yard.config, yard.store, yard.podman
-    apps = store.list_apps()
-    listed = podman.parse_ps(await client.run("ps", "-a", "--format", "json"))
+@dataclass(slots=True)
+class _Seen:
+    """One look at Podman: every container, the live samples, and why the stopped ones stopped."""
+
+    listed: dict[str, Container]
+    samples: dict[str, Sample]
+    crashes: dict[str, tuple[bool, str]]
+
+
+async def _look(yard: Yard) -> _Seen:
+    listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
     try:
-        samples = podman.parse_stats(await client.run("stats", "--no-stream", "--format", "json"))
+        samples = podman.parse_stats(await yard.podman.run("stats", "--no-stream", "--format", "json"))
     except YardError:
         samples = {}
-    host = podman.parse_info(await client.run("info", "--format", "json"))
+    return _Seen(listed, samples, await _crashes(yard, listed))
+
+
+async def report(yard: Yard, running_only: bool = False) -> Report:
+    config = yard.config
+    apps = yard.store.list_apps()
+    seen = await _look(yard)
+    listed, samples = seen.listed, seen.samples
+    host = podman.parse_info(await yard.podman.run("info", "--format", "json"))
     if not host.disk:
         host.disk = disk_capacity(config.root)
-    crashes = await _crashes(yard, listed)
 
     # Apply containers in a deploy step are noise. Everything else shows.
     grouped: dict[str, list[Container]] = {}
@@ -128,21 +142,16 @@ async def report(yard: Yard, running_only: bool = False) -> Report:
 
     rows: list[Row] = []
     for app in apps:
-        items = [item for item in grouped.pop(app.name, []) if item.role == "app"]
-        tip = yard.tips.get(app.name)
-        deployed = running_plan(app, listed)
-        note = deploy_record(listed, app.name)
-        hosts = await sites.list_hosts(yard, app.name)
-        rows += _app_rows(config, app, items, samples, tip, deployed, note, hosts, crashes, running_only)
-    for name in sorted(grouped):
-        for item in sorted(grouped[name], key=_age):
-            if running_only and not item.running:
-                continue
-            rows.append(_row(config, item, None, samples.get(item.name), None, None, None, [], crashes))
-    for item in sorted(other, key=lambda one: one.name):
+        grouped.pop(app.name, None)
+        rows += _app_rows(
+            yard, app, seen, running_plan(app, listed), await sites.list_hosts(yard, app.name), running_only
+        )
+    loose = [item for name in sorted(grouped) for item in sorted(grouped[name], key=_age)]
+    for item in loose + sorted(other, key=lambda one: one.name):
         if running_only and not item.running:
             continue
-        rows.append(_row(config, item, None, samples.get(item.name), None, None, None, [], crashes))
+        data = dir_size(config.data(item.app or item.name))
+        rows.append(_row(item, None, samples.get(item.name), None, None, None, [], seen.crashes, data))
     shown = [samples.get(row.container) for row in rows]
     return Report(
         host=Host(
@@ -267,57 +276,43 @@ def _site_target(app: App, items: list[Container]) -> str:
 
 
 def _app_rows(
-    config: Config,
-    app: App,
-    items: list[Container],
-    samples: dict[str, Sample],
-    tip: Tip | None,
-    deployed: Deployed | None,
-    note: Record | None,
-    hosts: list[str],
-    crashes: dict[str, tuple[bool, str]],
-    running_only: bool,
+    yard: Yard, app: App, seen: _Seen, deployed: Deployed | None, hosts: list[str], running_only: bool
 ) -> list[Row]:
+    """The rows of one app: one per app container, or one `absent` row when it has none."""
+    items = [item for item in seen.listed.values() if item.app == app.name and item.role == "app"]
+    tip = yard.tips.get(app.name)
+    note = deploy_record(seen.listed, app.name)
+    data = dir_size(yard.config.data(app.name))
     shown = [item for item in items if not running_only or item.running]
     target = _site_target(app, shown)
-    rows: list[Row] = []
-    for item in sorted(shown, key=_age):
-        rows.append(
-            _row(
-                config,
-                item,
-                app,
-                samples.get(item.name),
-                tip,
-                deployed,
-                note,
-                hosts if item.name == target else [],
-                crashes,
-            )
+    rows = [
+        _row(
+            item,
+            app,
+            seen.samples.get(item.name),
+            tip,
+            deployed,
+            note,
+            hosts if item.name == target else [],
+            seen.crashes,
+            data,
         )
+        for item in sorted(shown, key=_age)
+    ]
     if not items and not running_only:
-        rows.append(_row(config, None, app, None, tip, deployed, note, hosts, crashes))
+        rows.append(_row(None, app, None, tip, deployed, note, hosts, seen.crashes, data))
     return rows
 
 
 async def app_report(yard: Yard, name: str) -> Page:
     """The one-app page: its rows, its hosts, its last deploy, its log tail."""
-    config, store, client = yard.config, yard.store, yard.podman
-    app = store.app(name)
-    listed = podman.parse_ps(await client.run("ps", "-a", "--format", "json"))
-    try:
-        samples = podman.parse_stats(await client.run("stats", "--no-stream", "--format", "json"))
-    except YardError:
-        samples = {}
-    tip = yard.tips.get(app.name)
-    deployed = running_plan(app, listed)
-    items = [item for item in listed.values() if item.app == name and item.role == "app"]
+    config = yard.config
+    app = yard.store.app(name)
+    seen = await _look(yard)
+    deployed = running_plan(app, seen.listed)
     hosts = await sites.list_hosts(yard, app.name)
-    note = deploy_record(listed, name)
-    crashes = await _crashes(yard, listed)
-    rows = _app_rows(config, app, items, samples, tip, deployed, note, hosts, crashes, False)
-    page_log = await _container_tail(yard, app_container(name))
-    image = items[0].image if items else ""
+    rows = _app_rows(yard, app, seen, deployed, hosts, False)
+    image = rows[0].image
     return Page(
         app=app,
         image=image,
@@ -326,8 +321,8 @@ async def app_report(yard: Yard, name: str) -> Page:
         dir=str(config.app_dir(name)),
         rows=rows,
         hosts=hosts,
-        deploy=note,
-        log=page_log,
+        deploy=deploy_record(seen.listed, name),
+        log=await _container_tail(yard, app_container(name)),
         deployed=deployed,
         template_moved=any(row.template_moved for row in rows),
     )
@@ -346,7 +341,6 @@ def _health(item: Container) -> str:
 
 
 def _row(
-    config: Config,
     item: Container | None,
     app: App | None,
     sample: Sample | None,
@@ -355,6 +349,7 @@ def _row(
     note: Record | None,
     hosts: list[str],
     crashes: dict[str, tuple[bool, str]],
+    data: int,
 ) -> Row:
     """One rendered row. app None means the container has no app row behind it."""
     image = (item.image if item and item.image else "") or ""
@@ -362,7 +357,6 @@ def _row(
         health = _health(item)
     else:
         health = "down"
-    key = app.name if app else ((item.app or item.name) if item else "")
     oom, error = crashes.get(item.name, (False, "")) if item and not item.running else (False, "")
     return Row(
         app=app.name if app else (item.app if item else ""),
@@ -386,7 +380,7 @@ def _row(
         trigger=app.trigger if app else "",
         cpu=sample.cpu if sample else "",
         mem=sample.mem if sample else "",
-        data=dir_size(config.data(key)),
+        data=data,
         deploy=note,
     )
 
