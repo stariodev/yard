@@ -1,6 +1,7 @@
 """Compose projects. Yard sets the env; the apply image runs docker-compose on the files as they are."""
 
 import asyncio
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from app.shared import YardError, deploy_container, ensure_file, short_sha
 
 if TYPE_CHECKING:
     from app.server.store import Config
+
+log = logging.getLogger("yard")
 
 APPLY_DIR = "/usr/local/share/yard/apply"
 if not Path(APPLY_DIR).is_dir():
@@ -114,18 +117,14 @@ async def apply(
     command: str,
     project: Project,
     *,
+    labels: dict[str, str] | None = None,
     detach: bool = False,
     on_line: Callable[[str], None] | None = None,
 ) -> tuple[int, str]:
     """Run the apply script as one Podman container. A non-zero exit is the deploy log, not an exception."""
-    # The name is fixed so `podman logs deploy-<name>` is the whole deploy story.
-    # --replace replaces the previous container and its log.
-    name = deploy_container(app)
     argv = _podman(config) + [
         "run",
-        "--replace",
-        "--name",
-        name,
+        *_record_args(app, labels or {}),
         "--network",
         "yard",
         "-v",
@@ -143,6 +142,34 @@ async def apply(
         argv.append("-d")
     argv += ["localhost/yard-apply", command]
     return await _run(argv, _process_env(config), on_line=on_line)
+
+
+async def record_failure(config: Config, app: str, labels: dict[str, str], lines: list[str]) -> None:
+    """A deploy that failed before the apply: a deploy container that prints its lines and exits 1."""
+    argv = _podman(config) + [
+        "run",
+        *_record_args(app, labels),
+        "--entrypoint",
+        "sh",
+        "-e",
+        "YARD_LOG=" + "\n".join(lines),
+        "localhost/yard-apply",
+        "-c",
+        'printf "%s\\n" "$YARD_LOG"; exit 1',
+    ]
+    try:
+        await _run(argv, _process_env(config))
+    except Exception as exc:
+        log.warning("deploy record %s: %s", app, exc)
+
+
+def _record_args(app: str, labels: dict[str, str]) -> list[str]:
+    """The fixed name and the labels. The name makes `podman logs deploy-<name>` the last deploy;
+    --replace drops the one before. `status.deploy_record` reads the labels back."""
+    args = ["--replace", "--name", deploy_container(app)]
+    for key in sorted(labels):
+        args += ["--label", f"yard.{key}={labels[key]}"]
+    return args
 
 
 async def build_apply(config: Config) -> tuple[int, str]:

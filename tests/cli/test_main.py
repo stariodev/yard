@@ -71,7 +71,7 @@ def test_main_end_to_end(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
                     "env_file": "",
                     "rows": [],
                     "binds": [],
-                    "deploys": [],
+                    "deploy": None,
                     "log": "",
                 }
             ),
@@ -113,7 +113,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
         "env_file": "/srv/yard/apps/heldso/env",
         "rows": [report["rows"][0]],
         "hosts": ["heldso.example.com"],
-        "deploys": [],
+        "deploy": None,
         "log": "one\ntwo\n",
     }
     bodies = {
@@ -140,7 +140,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     out = capsys.readouterr().out
     assert "caddy heldso.example.com" in out
     assert "containers" in out
-    assert "no deploys yet" in out
+    assert "no deploy yet" in out
     assert "  two" in out
 
     with pytest.raises(SystemExit) as exited:
@@ -196,7 +196,7 @@ _RM_PAGE = {
     "env_file": "/srv/yard/apps/heldso/env",
     "rows": [{"container": "heldso-app-1", "data": 1_200_000_000}],
     "hosts": ["heldso.example.com"],
-    "deploys": [],
+    "deploy": None,
     "log": "",
 }
 
@@ -1656,7 +1656,6 @@ def test_app_logs_builds_the_query(monkeypatch: pytest.MonkeyPatch, capsys: pyte
     _env(monkeypatch)
     main(["app", "logs", "--app", "heldso", "--since", "-1h", "--deploy", "--tail", "50"])
     assert calls == [
-        ("GET", "/api/v1/apps/heldso/deploy", None),
         ("GET", "/api/v1/logs?lines=50&container=deploy-heldso&since=-1h", None),
     ]
     assert "line one" in capsys.readouterr().out

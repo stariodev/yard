@@ -28,6 +28,8 @@ class Container:
     created: datetime | None = None
     started: datetime | None = None
     exited: datetime | None = None
+    # The yard.* labels of a deploy container, without the prefix.
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -263,10 +265,16 @@ def parse_ps(raw: str) -> dict[str, Container]:
 
         # The deploy container is deploy-<name>.
         name = names[0]
+        labels: dict[str, str] = {}
         if name.startswith("deploy-"):
             role = "deploy"
             app = name.split("-", 1)[1]
             service = ""
+            given = row.get("Labels")
+            if isinstance(given, dict):
+                labels = {
+                    str(key)[5:]: str(value) for key, value in given.items() if str(key).startswith("yard.") and value
+                }
         else:
             role = "app"
             app = _label(row, "com.docker.compose.project")
@@ -286,6 +294,7 @@ def parse_ps(raw: str) -> dict[str, Container]:
             created=_stamp(row.get("Created")),
             started=_stamp(row.get("StartedAt")),
             exited=_stamp(row.get("ExitedAt")),
+            labels=labels,
         )
         item.running = item.state == "running"
         found[item.name] = item

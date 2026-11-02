@@ -627,22 +627,15 @@ def _cmd_logs(args: argparse.Namespace) -> None:
 def _cmd_app_logs(args: argparse.Namespace) -> None:
     session = _load(args)
     name = _app_name(session, args)
-    if args.deploy and not args.container:
+    if args.deploy and args.follow and not args.container:
         code, text = _api_try(session, "GET", f"/api/v1/apps/{quote(name)}/deploy", None)
-        if code == 200:
-            if args.follow:
-                _follow_deploy(session, name)
-            elif _json:
-                print(text)
-            else:
-                wrap = _object(text)
-                job = wrap.get("deploy") if isinstance(wrap, dict) else None
-                for line in (job or {}).get("lines") or []:
-                    print(line)
+        wrap = _object(text) if code == 200 else None
+        record = wrap.get("deploy") if isinstance(wrap, dict) else None
+        if isinstance(record, dict) and record.get("status") == "running":
+            # A running deploy streams its lines from the start, the sync included.
+            _follow_deploy(session, name)
             return
-        if code != 404:
-            _die(text if _json else explain(text))
-        # No job since Yard started: the journald container still holds the last deploy.
+    # The deploy container's log is the last deploy, in the journal.
     container = args.container or (deploy_container(name) if args.deploy else app_container(name))
     _logs(session, container, args)
 

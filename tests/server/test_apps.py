@@ -49,8 +49,10 @@ class _Apply:
         self.code = code
         self.text = text
 
-    async def __call__(self, config, app, command, project, *, detach=False, on_line=None) -> tuple[int, str]:
-        self.calls.append({"command": command, "app": app, "project": project, "detach": detach})
+    async def __call__(
+        self, config, app, command, project, *, labels=None, detach=False, on_line=None
+    ) -> tuple[int, str]:
+        self.calls.append({"command": command, "app": app, "project": project, "detach": detach, "labels": labels})
         if on_line is not None:
             for line in self.text.splitlines():
                 on_line(line)
@@ -85,10 +87,18 @@ def _deploy_yard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "h
 
 async def test_deploy_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard, recorder = _deploy_yard(tmp_path, monkeypatch)
-    outcome = await apps.deploy(yard, "heldso")
+    outcome = await apps.deploy(yard, "heldso", cause="push", actor="webhook:origin")
     assert outcome.status == "ok"
     assert outcome.image.startswith("localhost/heldso:")
     assert recorder.calls[0]["command"] == "up"
+    # The deploy container carries the record.
+    sha = git.head(yard.config.clone("heldso"))
+    assert recorder.calls[0]["labels"] == {
+        "sha": sha,
+        "image": outcome.image,
+        "cause": "push",
+        "actor": "webhook:origin",
+    }
     deployed = read_deployed(yard.config, "heldso")
     assert deployed is not None
     assert deployed.revision == git.head(yard.config.clone("heldso"))
@@ -249,9 +259,21 @@ async def test_deploy_runs_path_missing_fails(tmp_path: Path, monkeypatch: pytes
         return git.head(clone)
 
     monkeypatch.setattr(git, "sync", fake_sync)
+    recorded: list[tuple[str, dict, list[str]]] = []
+
+    async def fake_record(config, name, labels, lines):
+        recorded.append((name, labels, list(lines)))
+
+    monkeypatch.setattr(compose, "record_failure", fake_record)
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "failed"
     assert "deploy/x.yml is not a file" in outcome.error
+    # The apply never ran, so a failed deploy container records the deploy and its lines.
+    name, labels, lines = recorded[0]
+    assert name == "heldso"
+    assert labels["sha"] == git.head(yard.config.clone("heldso"))
+    assert "deploy/x.yml is not a file" in labels["error"]
+    assert lines[0].startswith("== sync") and lines[-1].startswith("!! ")
 
 
 async def test_deploy_image_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1034,7 +1056,7 @@ async def test_a_very_long_apply_line_still_deploys(tmp_path: Path, monkeypatch:
     yard, _recorder = _deploy_yard(tmp_path, monkeypatch)
     long_line = "x" * (100 * 1024)
 
-    async def apply(config, name, command, project, *, detach=False, on_line=None):
+    async def apply(config, name, command, project, *, labels=None, detach=False, on_line=None):
         if on_line:
             on_line(long_line)
         return 0, long_line + "\n"

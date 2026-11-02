@@ -68,6 +68,8 @@ Run the server with `python -m app.server.main`.
 
 Caddy reads `ops/Caddyfile`, which imports `/config/sites/*.caddy`. That directory is `apps/yard/caddy/config/sites/` on the host, inside the `/config` mount Caddy already has; Caddy sees no env file and no data. Each app has one site file, `<name>.caddy`. Yard stores the text and never parses it. A change writes the file, then posts `import /etc/caddy/Caddyfile` to the admin `/load`; when Caddy answers 400, Yard writes the old file back and returns Caddy's error. A deploy does not touch Caddy. Caddy runs with `--resume`, so a restart serves the last loaded config; Yard loads the Caddyfile again at boot (`sites.boot`). With no site file at all, that boot first writes one default site for each app from the 0.10 bind routes that Caddy resumed (`_import_binds`).
 
+A deploy runs one apply container, `deploy-<name>`. `apps._ready_repo` (a repo app) and `apps._ready_source` (an image or a compose URL in `--runs`) each return a `Ready`; `apps._apply` runs it the same way for both. The container's `yard.*` labels and exit code are the deploy record (`status.deploy_record`); a deploy that fails before the apply leaves a failed container through `compose.record_failure`. The in-memory `Job` only streams a running deploy to `yard app deploy`.
+
 The `journal` adapter works both ways: `send` writes a Yard event to the journald native socket (stdout JSON when the socket is missing), and `read`/`follow` run journalctl. No event field may carry a secret — an env change logs key names only.
 
 The package uses `uv_build` with `module-name = ["app"]`. `package = false` in `[tool.uv]` keeps the top-level `app` importable from the checkout.

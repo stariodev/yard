@@ -168,7 +168,7 @@ def test_app_report_is_the_app_page(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert found["env_file"].endswith("apps/heldso/env")
     assert found["hosts"] == ["heldso.example.com"]
     assert [row["container"] for row in found["rows"]] == ["heldso-app-1"]
-    assert found["deploys"] == []
+    assert found["deploy"] is None
     assert "two" in found["log"]
 
 
@@ -222,3 +222,24 @@ def read_dep(config, name):
     from app.server.store import read_deployed
 
     return read_deployed(config, name)
+
+
+@pytest.mark.parametrize(
+    ("state", "code", "status_", "error"),
+    [
+        ("running", 0, "running", ""),
+        ("exited", 0, "ok", ""),
+        ("exited", 3, "reverted", "unhealthy; reverted to localhost/heldso:old"),
+        ("exited", 1, "failed", "apply exited 1"),
+    ],
+)
+def test_deploy_record_reads_the_labels_and_the_exit_code(state, code, status_, error):
+    from app.server.podman import parse_ps
+
+    labels = {"yard.sha": "abc123", "yard.image": "localhost/heldso:abc123", "yard.previous": "localhost/heldso:old"}
+    raw = json.dumps([{"Names": ["deploy-heldso"], "State": state, "ExitCode": code, "Labels": labels}])
+    record = status.deploy_record(parse_ps(raw), "heldso")
+    assert record is not None
+    assert record["sha"] == "abc123" and record["image"] == "localhost/heldso:abc123"
+    assert record["status"] == status_
+    assert record["error"] == error
