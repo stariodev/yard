@@ -28,6 +28,7 @@ EVENTS = Route("GET /api/v1/events")
 DOCTOR = Route("GET /api/v1/doctor")
 FORGES = Route("GET /api/v1/forges")
 FORGE_PUT = Route("PUT /api/v1/forges/{name}")
+FORGE_INSTALLATIONS = Route("POST /api/v1/forges/{name}/installations")
 REPOS = Route("POST /api/v1/repos")
 REPO_TOKEN = Route("POST /api/v1/repos/token")
 APPS = Route("GET /api/v1/apps")
@@ -127,12 +128,7 @@ async def _hook_body(c: Context, w: Writer) -> bytes | None:
 
 
 def _hook_received(config: Config, forge: Forge, repo: str, kind: str, c: Context) -> None:
-    delivery = (
-        c.req.headers.get("x-github-delivery")
-        or c.req.headers.get("x-origin-delivery")
-        or c.req.headers.get("x-delivery")
-        or ""
-    )
+    delivery = next((value for name in forge.delivery_headers if (value := c.req.headers.get(name))), "")
     journal.send(
         config,
         "hook.received",
@@ -142,34 +138,6 @@ def _hook_received(config: Config, forge: Forge, repo: str, kind: str, c: Contex
         kind=str(kind),
         delivery=delivery,
     )
-
-
-def _named(forges: dict[str, Forge], name: str) -> Forge:
-    for forge in forges.values():
-        if forge.name == name:
-            return forge
-    raise YardError(404, "not_found", f"unknown forge {name}", help_text="The forges are origin and github.")
-
-
-async def _install(forge: Forge, config: Config) -> str:
-    """One find_installations for an app that has none. Returns the error text."""
-    if not forge.app_id or forge.installations:
-        return ""
-    try:
-        installations = await forge.find_installations()
-    except Exception as exc:
-        return str(exc)
-    if not installations:
-        return ""
-    journal.send(
-        config,
-        "forge.installation",
-        f"{forge.name} installation",
-        forge=forge.name,
-        accounts=",".join(str(entry.get("account") or "") for entry in installations),
-        installations=",".join(str(entry.get("id") or "") for entry in installations),
-    )
-    return ""
 
 
 def _job_json(job: Job) -> dict[str, Any]:
@@ -571,6 +539,7 @@ class HostPage:
         app.add(PRUNE, self.run_prune, middleware=middleware)
         app.add(FORGES, self.forges_list, middleware=middleware)
         app.add(FORGE_PUT, self.forge_put, middleware=middleware)
+        app.add(FORGE_INSTALLATIONS, self.forge_installations, middleware=middleware)
         app.add(REPOS, self.repo_create, middleware=middleware)
         app.add(REPO_TOKEN, self.repo_token, middleware=middleware)
 
@@ -596,20 +565,23 @@ class HostPage:
         w.json(cast(JsonValue, asdict(await apps.prune(self.yard, days, dry, actor=_actor(c)))))
 
     async def forges_list(self, _c: Context, w: Writer) -> None:
-        """The forge summaries. A connected app with no installation gets one
-        lookup per read; a lookup failure only marks that summary."""
-        rows = []
-        for forge in self.yard.forges.values():
-            error = await _install(forge, self.yard.config)
+        """The forge summaries, as saved. A read asks no forge."""
+        w.json(cast(JsonValue, [forge.summary() for forge in self.yard.forges.values()]))
+
+    async def forge_installations(self, c: Context, w: Writer) -> None:
+        """Ask the forge for the app's installations and save them. A setup polls this until one lands."""
+        forge = self.yard.forge_named(c.match.params["name"])
+        summary = forge.summary()
+        if forge.app_id:
+            error = await apps.refresh_installations(self.yard, forge)
             summary = forge.summary()
             if error:
                 summary["error"] = error
-            rows.append(summary)
-        w.json(cast(JsonValue, rows))
+        w.json(cast(JsonValue, summary))
 
     async def forge_put(self, c: Context, w: Writer) -> None:
         """Save a forge app once its credentials pass the forge's own check."""
-        forge = _named(self.yard.forges, c.match.params["name"])
+        forge = self.yard.forge_named(c.match.params["name"])
         data = await json_object(c)
         if isinstance(forge, Origin):
             app_id = data.get("app_id", "")
@@ -631,11 +603,12 @@ class HostPage:
                 actor=_actor(c),
             )
             app = {
-                "name": info.get("displayName") or info.get("name") or "",
-                "webhook_url": info.get("webhookUrl") or info.get("webhook_url") or "",
+                "name": info.get(forge.name_field) or "",
+                "webhook_url": info.get("webhookUrl") or "",
                 "events": info.get("events") or [],
             }
-        elif isinstance(forge, GitHub):
+        else:
+            assert isinstance(forge, GitHub)
             app_id = data.get("app_id", "")
             private_key = data.get("private_key", "")
             secret = data.get("webhook_secret", "")
@@ -663,14 +636,10 @@ class HostPage:
                 actor=_actor(c),
             )
             app = {
-                "name": info.get("name") or "",
+                "name": info.get(forge.name_field) or "",
                 "slug": info.get("slug") or "",
                 "events": info.get("events") or [],
             }
-        else:
-            raise YardError(
-                404, "not_found", f"unknown forge {forge.name}", help_text="The forges are origin and github."
-            )
         w.json(cast(JsonValue, {"forge": forge.summary(), "app": app}))
 
     async def repo_create(self, c: Context, w: Writer) -> None:

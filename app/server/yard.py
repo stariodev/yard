@@ -74,7 +74,7 @@ class Yard:
         # One lock for every site file write and Caddy load.
         self.sites_lock = asyncio.Lock()
         self.checked: dict[str, float] = {}
-        self.queued: dict[str, Callable[[], Awaitable[None]]] = {}
+        self.queued: dict[str, Callable[[], Awaitable[object]]] = {}
         self.tasks: list[asyncio.Task[None]] = []
         self.stario: StarioApp | None = None
         self.last_prune = ""

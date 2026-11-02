@@ -17,6 +17,20 @@ from app.cli.main import main
 from tests.conftest import stamp, status_report
 
 
+def _forge_rows(fake):
+    """POST /forges/NAME/installations answers that forge's row from the fake's GET /forges."""
+
+    def wrapped(client, method, path, body, timeout=None):
+        found = re.fullmatch(r"/api/v1/forges/(\w+)/installations", path)
+        if method != "POST" or not found:
+            return fake(client, method, path, body, timeout)
+        code, raw = fake(client, "GET", "/api/v1/forges", None, timeout)
+        rows = json.loads(raw)
+        return code, json.dumps(next((row for row in rows if row.get("name") == found.group(1)), {}))
+
+    return wrapped
+
+
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YARD_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("YARD_TOKEN", "token")
@@ -43,7 +57,7 @@ def test_resource_ls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixt
     def fake_api_try(client, method, path, body, timeout=None):
         return bodies[path]
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
 
     main(["app", "ls"])
@@ -81,7 +95,7 @@ def test_main_end_to_end(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     def fake_api_try(client, method, path, body, timeout=None):
         return bodies[path.split("?")[0]]
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
 
     main(["status"])
@@ -133,7 +147,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     def fake_api_try(client, method, path, body, timeout=None):
         return bodies[path.split("?")[0]]
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
 
     main(["app", "status", "--app", "heldso"])
@@ -162,7 +176,7 @@ def test_app_deploy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtu
             )
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     note = {"status": "ok", "image": "localhost/app:abc"}
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: (print("ready"), note)[1])
@@ -212,7 +226,7 @@ def test_app_rm_refuses_a_non_tty(monkeypatch: pytest.MonkeyPatch, capsys: pytes
 
 def test_app_rm_confirms_and_names_the_site(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     deleted = {"name": "heldso", "hosts": ["heldso.example.com"]}
-    monkeypatch.setattr(cli, "_api_try", _rm_api(_RM_PAGE, deleted))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_rm_api(_RM_PAGE, deleted)))
     monkeypatch.setattr(sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": "heldso")
     _env(monkeypatch)
@@ -233,7 +247,7 @@ def test_app_rm_a_wrong_answer_removes_nothing(monkeypatch: pytest.MonkeyPatch, 
         calls.append((method, path))
         return 200, json.dumps(_RM_PAGE)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": "other")
     _env(monkeypatch)
@@ -250,7 +264,7 @@ def test_app_rm_yes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtu
         calls.append((method, path))
         return 200, json.dumps({"name": "heldso", "hosts": []})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "rm", "--app", "heldso", "--yes"])
     assert calls == [("DELETE", "/api/v1/apps/heldso")]
@@ -263,7 +277,7 @@ def test_app_rm_warns_when_caddy_refuses(monkeypatch: pytest.MonkeyPatch, capsys
     def fake_api_try(client, method, path, body, timeout=None):
         return 200, json.dumps(deleted)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "rm", "--app", "heldso", "--yes"])
     out = capsys.readouterr().out
@@ -326,7 +340,7 @@ def test_env_edit_an_editor_failure_saves_nothing(monkeypatch: pytest.MonkeyPatc
     class _Proc:
         returncode = 3
 
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, "{}"))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: (200, "{}")))
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Proc())
     monkeypatch.setattr(sys, "stdin", _TTY())
     _env(monkeypatch)
@@ -341,7 +355,7 @@ def test_app_deploy_failed_reads_the_log_hint(monkeypatch: pytest.MonkeyPatch, c
         "app": {"name": "heldso", "trigger": "manual"},
         "deploy": {"status": "failed", "image": "localhost/heldso:abc", "log": "== boom\n", "error": "apply exited 1"},
     }
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, json.dumps(wrap)))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: (200, json.dumps(wrap))))
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: wrap["deploy"])
     _env(monkeypatch)
     with pytest.raises(SystemExit):
@@ -361,7 +375,7 @@ def test_app_deploy_reverted_explains_the_old_image(monkeypatch: pytest.MonkeyPa
             "previous": "localhost/heldso:old",
         },
     }
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, json.dumps(wrap)))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: (200, json.dumps(wrap))))
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: wrap["deploy"])
     _env(monkeypatch)
     main(["app", "deploy", "--app", "heldso"])
@@ -378,7 +392,7 @@ def test_app_deploy_a_server_500_keeps_the_log_hint(monkeypatch: pytest.MonkeyPa
             "help": "Read the full log: yard app logs --deploy --app heldso",
         }
     }
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (500, json.dumps(body)))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: (500, json.dumps(body))))
     _env(monkeypatch)
     with pytest.raises(SystemExit):
         main(["app", "deploy", "--app", "heldso"])
@@ -405,7 +419,7 @@ def test_app_new(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
             )
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(
         cli,
         "_follow_deploy",
@@ -461,7 +475,7 @@ def test_app_new_no_deploy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captu
         seen.append((method, path, body))
         return 200, json.dumps({"app": {"name": "heldso", "repo": body["repo"], "ref": body["ref"]}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "new", "--repo", "https://origin.cursor.com/org/heldso", "--no-deploy"])
     assert seen == [
@@ -487,7 +501,7 @@ def test_app_new_a_failed_deploy_keeps_the_app(monkeypatch: pytest.MonkeyPatch, 
             )
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     with pytest.raises(SystemExit) as caught:
         main(["app", "new", "--repo", "https://origin.cursor.com/org/heldso"])
@@ -499,7 +513,7 @@ def test_app_new_a_failed_deploy_keeps_the_app(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_app_rm_ctrl_c_says_not_removed(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, json.dumps(_RM_PAGE)))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: (200, json.dumps(_RM_PAGE))))
     monkeypatch.setattr(sys, "stdin", _TTY())
 
     def _interrupt(_prompt=""):
@@ -532,7 +546,7 @@ def test_app_new_trigger(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
             )
         return 200, json.dumps({"deploy": {"status": "ok", "image": "localhost/app:dev", "log": ""}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
 
@@ -556,7 +570,7 @@ def test_app_new_ref_follows_the_checkout_repo(monkeypatch: pytest.MonkeyPatch, 
             )
         return 200, json.dumps({"deploy": {"status": "ok", "image": "localhost/app:main", "log": ""}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
@@ -595,7 +609,7 @@ def test_app_set_message(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
             return 200, json.dumps({"app": dict(state)})
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
 
     # A ref move on a push app points at the next check.
@@ -641,7 +655,7 @@ def test_env_commands(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFix
             return 200, json.dumps({"keys": sorted(env)})
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
 
     main(["env", "set", "B=2", "C=3", "--app", "heldso"])
@@ -686,7 +700,7 @@ def _caddy_api(site: dict, seen: list, refuse: str = ""):
 def test_caddy_cat_and_edit_from_stdin(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     site: dict = {}
     seen: list = []
-    monkeypatch.setattr(cli, "_api_try", _caddy_api(site, seen))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_caddy_api(site, seen)))
     _env(monkeypatch)
 
     main(["caddy", "cat", "--app", "heldso"])
@@ -704,7 +718,7 @@ def test_caddy_cat_and_edit_from_stdin(monkeypatch: pytest.MonkeyPatch, capsys: 
 def test_caddy_edit_in_the_editor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     site: dict = {}
     seen: list = []
-    monkeypatch.setattr(cli, "_api_try", _caddy_api(site, seen))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_caddy_api(site, seen)))
     monkeypatch.setattr(sys, "stdin", _TTY())
     _env(monkeypatch)
 
@@ -725,7 +739,9 @@ def test_caddy_edit_a_refused_file_opens_the_editor_again(
 ):
     seen: list = []
     edits: list[str] = []
-    monkeypatch.setattr(cli, "_api_try", _caddy_api({}, seen, refuse="heldso.caddy:2: unrecognized directive: x"))
+    monkeypatch.setattr(
+        cli, "_api_try", _forge_rows(_caddy_api({}, seen, refuse="heldso.caddy:2: unrecognized directive: x"))
+    )
     monkeypatch.setattr(sys, "stdin", _TTY())
 
     def fake_edit(text: str, suffix: str = "") -> str:
@@ -776,7 +792,7 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
             }
         )
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
 
     main(["prune"])
@@ -800,7 +816,7 @@ def test_login_warns_when_no_forge_is_connected(
         report["host"]["forges"] = {"origin": False, "github": False}
         return 200, json.dumps(report)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     main(["login", "--url", "http://127.0.0.1:8000", "--token", "tok"])
     err = capsys.readouterr().err
     assert cli.FORGE_HINT in err
@@ -863,7 +879,7 @@ def test_app_deduction(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     def fake_api_try(client, method, path, body, timeout=None):
         return 200, json.dumps([{"name": "heldso", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"}])
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     assert cli._app_name(cli.Client("http://x", "t"), argparse_ns()) == "heldso"
 
@@ -879,7 +895,7 @@ def test_app_deduction_ssh_forms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
         def fake_api_try(client, method, path, body, timeout=None):
             return 200, json.dumps([{"name": "heldso", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"}])
 
-        monkeypatch.setattr(cli, "_api_try", fake_api_try)
+        monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
         _env(monkeypatch)
         assert cli._app_name(cli.Client("http://x", "t"), argparse_ns()) == "heldso"
 
@@ -904,7 +920,7 @@ def test_app_deduction_feature_branch_names_the_app(monkeypatch: pytest.MonkeyPa
             )
         return 200, json.dumps({"deploy": {"status": "ok", "image": "localhost/app:main", "log": ""}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
     main(["app", "new"])
@@ -917,7 +933,7 @@ def test_app_deduction_feature_branch_names_the_app(monkeypatch: pytest.MonkeyPa
 
 def test_app_deduction_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture):
     _env(monkeypatch)
-    monkeypatch.setattr(cli, "_api_try", lambda client, method, path, body, timeout=None: (200, "[]"))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda client, method, path, body, timeout=None: (200, "[]")))
 
     # Not a git cli.
     monkeypatch.chdir(tmp_path)
@@ -979,7 +995,7 @@ def test_forge_ls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
             "last_check": "",
         },
     ]
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, json.dumps(rows)))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: (200, json.dumps(rows))))
     _env(monkeypatch)
     main(["forge", "ls"])
     out = capsys.readouterr().out
@@ -1056,7 +1072,7 @@ def _config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def test_forge_setup_origin(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("app_123"))
     _env(monkeypatch)
@@ -1105,7 +1121,7 @@ def test_forge_setup_polls_and_warns(monkeypatch: pytest.MonkeyPatch, capsys: py
             )
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("app_123"))
     _env(monkeypatch)
@@ -1119,7 +1135,7 @@ def test_forge_setup_polls_and_warns(monkeypatch: pytest.MonkeyPatch, capsys: py
 
 def test_forge_setup_origin_reprompts_a_bad_app_id(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("app_a b", "app_123"))
     _env(monkeypatch)
@@ -1133,7 +1149,7 @@ def test_forge_setup_github(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
     pem = _pem(tmp_path, "app.pem")
     _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     # App ID first, then the key path (the --key default).
     monkeypatch.setattr("builtins.input", _answers("42", ""))
@@ -1163,7 +1179,7 @@ def test_forge_setup_github(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
 
 def test_forge_setup_github_refuses_http_to_a_remote(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     called: list = []
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: called.append(a) or (200, "{}"))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: called.append(a) or (200, "{}")))
     monkeypatch.setenv("YARD_URL", "http://yard.example.com")
     monkeypatch.setenv("YARD_TOKEN", "token")
     with pytest.raises(SystemExit):
@@ -1181,7 +1197,7 @@ def test_forge_setup_github_accepts_quoted_and_escaped_paths(monkeypatch: pytest
     _env(monkeypatch)
     for answer in (f"'{pem}'", str(spaced).replace(" ", "\\ ")):
         calls: list = []
-        monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+        monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
         monkeypatch.setattr("builtins.input", _answers("42", answer))
         main(["forge", "setup", "github", "--manual", "--no-browser"])
         put = [call for call in calls if call[0] == "PUT"]
@@ -1200,7 +1216,7 @@ def test_forge_setup_github_reprompts_a_missing_key(
     pem = _pem(tmp_path)
     _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("42", str(tmp_path / "missing.pem"), str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "s" * 64)
@@ -1217,7 +1233,7 @@ def test_forge_setup_github_reprompts_a_bad_app_id(
     pem = _pem(tmp_path)
     _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("forty-two", "42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "s" * 64)
@@ -1250,7 +1266,7 @@ def test_forge_setup_github_retries_after_a_client_error(
             return 200, json.dumps({"forge": {"name": "github"}, "app": {"slug": "yard-host"}})
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     # First App ID + key are refused by the API; the wizard asks both again.
     monkeypatch.setattr("builtins.input", _answers("41", str(pem), "42", str(pem)))
@@ -1268,7 +1284,7 @@ def test_forge_setup_github_resumes_a_stopped_run(
     pem = _pem(tmp_path)
     cfg = _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     opened: list = []
     monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
@@ -1315,7 +1331,7 @@ def test_forge_setup_github_new_mints_a_fresh_secret(
         json.dumps({"url": "http://127.0.0.1:8000", "secret": "old-secret", "created": "2026-01-01T00:00:00+00:00"})
     )
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "n" * 64)
@@ -1348,7 +1364,7 @@ def test_forge_setup_github_continues_to_the_install(
             return 200, json.dumps([row])
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     _env(monkeypatch)
     main(["forge", "setup", "github", "--no-browser"])
@@ -1380,7 +1396,7 @@ def test_forge_setup_github_already_connected(
             )
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["forge", "setup", "github", "--no-browser"])
     out = capsys.readouterr().out
@@ -1416,7 +1432,7 @@ def test_forge_setup_github_new_ignores_a_connected_forge(
             return 200, json.dumps({"forge": {"name": "github"}, "app": {"slug": "yard-host"}})
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "n" * 64)
@@ -1525,7 +1541,7 @@ def test_forge_setup_github_manifest_page():
 def test_forge_setup_github_manifest(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path):
     cfg = _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     opened: list = []
     monkeypatch.setattr(cli.webbrowser, "open", _drive_manifest(opened, bad_state_first=True))
@@ -1557,7 +1573,7 @@ def test_forge_setup_github_manifest_no_browser(
 ):
     _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     opened: list = []
 
@@ -1582,7 +1598,7 @@ def test_forge_setup_github_manifest_times_out(
 ):
     _config_dir(monkeypatch, tmp_path)
     calls: list = []
-    monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_fake_setup_api(calls)))
     monkeypatch.setattr(cli, "SETUP_LIMIT", 0.05)
     monkeypatch.setattr(cli, "_open", lambda args, url: None)
     _env(monkeypatch)
@@ -1612,7 +1628,7 @@ def test_forge_setup_github_manifest_keeps_a_failed_put(
             return 200, json.dumps({"forge": {"name": "github"}, "app": {"slug": "yard-127-0-0-1"}})
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     opened: list = []
     monkeypatch.setattr(cli.webbrowser, "open", _drive_manifest(opened))
@@ -1652,7 +1668,7 @@ def test_app_logs_builds_the_query(monkeypatch: pytest.MonkeyPatch, capsys: pyte
             return 404, "no deploy since Yard started"
         return 200, "line one\n"
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "logs", "--app", "heldso", "--since", "-1h", "--deploy", "--tail", "50"])
     assert calls == [
@@ -1671,7 +1687,7 @@ def test_app_logs_follow_streams(monkeypatch: pytest.MonkeyPatch):
 
 def test_logs_by_name_or_id(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     calls = []
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: calls.append(a[2]) or (200, "x\n"))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: calls.append(a[2]) or (200, "x\n")))
     _env(monkeypatch)
     main(["logs", "yard-caddy-1", "--tail", "10"])
     main(["logs", "abc123def456"])
@@ -1683,7 +1699,7 @@ def test_logs_by_name_or_id(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
 
 def test_logs_sends_hide_and_only(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     calls = []
-    monkeypatch.setattr(cli, "_api_try", lambda *a, **k: calls.append(a[2]) or (200, "x\n"))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(lambda *a, **k: calls.append(a[2]) or (200, "x\n")))
     _env(monkeypatch)
     main(["logs", "heldso-app-1", "--hide", "a=b", "--hide", "noise", "--only", "status=error"])
     assert calls == ["/api/v1/logs?lines=100&container=heldso-app-1&hide=a%3Db&hide=noise&only=status%3Derror"]
@@ -1708,7 +1724,7 @@ def test_events_build_the_query(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
             ]
         )
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["events", "--app", "heldso", "--source", "podman", "--since", "-1h"])
     assert calls[-1] == ("GET", "/api/v1/events?lines=200&since=-1h&app=heldso&source=podman", None)
@@ -1722,7 +1738,7 @@ def test_app_cat(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
             return 200, "FROM scratch\n"
         raise AssertionError(path)
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "cat", "containerfile", "--app", "heldso"])
     assert capsys.readouterr().out == "FROM scratch\n"
@@ -1747,7 +1763,7 @@ def test_app_new_image(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFi
             return 200, json.dumps({"deploy": {"status": "ok", "port": 3000}})
         return 200, "{}"
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
     main(["app", "new", "--runs", "ghcr.io/you/api:1.4"])
@@ -1768,7 +1784,7 @@ def test_app_new_recipe_caddy_port(monkeypatch: pytest.MonkeyPatch, capsys: pyte
             return 200, json.dumps({"deploy": {"status": "ok", "port": 3000}})
         return 200, "{}"
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": 3000})
     main(
@@ -1792,7 +1808,7 @@ def test_app_set_runs_push_message(monkeypatch: pytest.MonkeyPatch, capsys: pyte
             return 200, json.dumps({"app": {"name": "db", "runs": "postgres:16", "trigger": "push"}})
         return 200, json.dumps({"app": {"name": "db", "runs": "postgres:17", "trigger": "push"}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "set", "--app", "db", "--runs", "postgres:17"])
     out = capsys.readouterr().out
@@ -1805,7 +1821,7 @@ def test_app_set_runs_manual_message(monkeypatch: pytest.MonkeyPatch, capsys: py
             return 200, json.dumps({"app": {"name": "db", "runs": "postgres:16", "trigger": "manual"}})
         return 200, json.dumps({"app": {"name": "db", "runs": "postgres:17", "trigger": "manual"}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     main(["app", "set", "--app", "db", "--runs", "postgres:17"])
     out = capsys.readouterr().out
@@ -1828,7 +1844,7 @@ def _new_web(monkeypatch: pytest.MonkeyPatch, sent: list, port: int, deploy_code
             return 200, json.dumps({"deploy": {"status": "ok", "port": port}})
         return 200, json.dumps({"hosts": ["web.example.com"]})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": port})
     _env(monkeypatch)
 
@@ -1897,7 +1913,7 @@ def _new_env_fakes(monkeypatch, sent):
         sent.append((method, path, body))
         return 200, json.dumps({"app": {"name": "heldso"}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
     _env(monkeypatch)
 
@@ -2018,7 +2034,7 @@ def test_app_new_failed_first_deploy_exits_1(monkeypatch: pytest.MonkeyPatch, ca
             return 200, json.dumps({"app": {"name": "web"}})
         return 200, json.dumps({"deploy": {"status": "ok"}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "failed", "log": "== boom\n"})
     _env(monkeypatch)
     with pytest.raises(SystemExit) as caught:
@@ -2047,7 +2063,7 @@ def test_app_new_env_put_failure_dies_cleanly(monkeypatch: pytest.MonkeyPatch, c
             return 500, json.dumps({"error": {"message": "disk full"}})
         return 200, "{}"
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     with pytest.raises(SystemExit):
         main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1"])
@@ -2079,7 +2095,7 @@ def test_repo_new(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytes
     repo = _work_checkout(monkeypatch, tmp_path)
     bare = _bare_repo(tmp_path / "bare")
     seen: list = []
-    monkeypatch.setattr(cli, "_api_try", _repo_api(seen, repo=bare))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_repo_api(seen, repo=bare)))
     _env(monkeypatch)
     main(["repo", "new"])
     # The server picks the forge and the owner.
@@ -2129,7 +2145,7 @@ def test_repo_new_die_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cap
 def test_repo_new_a_push_failure_keeps_origin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys):
     repo = _work_checkout(monkeypatch, tmp_path)
     pushes: list = []
-    monkeypatch.setattr(cli, "_api_try", _repo_api(repo="https://github.com/org/heldso"))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_repo_api(repo="https://github.com/org/heldso")))
     monkeypatch.setattr(cli.subprocess, "run", _fake_push(pushes, ok=False))
     _env(monkeypatch)
     with pytest.raises(SystemExit):
@@ -2146,7 +2162,7 @@ def test_repo_new_warns_about_uncommitted_changes(monkeypatch: pytest.MonkeyPatc
     repo = _work_checkout(monkeypatch, tmp_path)
     bare = _bare_repo(tmp_path / "bare")
     (repo / "dirty.txt").write_text("dirty\n")
-    monkeypatch.setattr(cli, "_api_try", _repo_api(repo=bare))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_repo_api(repo=bare)))
     _env(monkeypatch)
     main(["repo", "new"])
     assert "warning: uncommitted changes are not pushed" in capsys.readouterr().err
@@ -2155,7 +2171,7 @@ def test_repo_new_warns_about_uncommitted_changes(monkeypatch: pytest.MonkeyPatc
 def test_repo_new_json_prints_repo_and_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys):
     _work_checkout(monkeypatch, tmp_path)
     bare = _bare_repo(tmp_path / "bare")
-    monkeypatch.setattr(cli, "_api_try", _repo_api(repo=bare))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_repo_api(repo=bare)))
     _env(monkeypatch)
     main(["repo", "new", "--json"])
     assert json.loads(capsys.readouterr().out) == {"repo": bare, "branch": "main"}
@@ -2165,7 +2181,7 @@ def test_repo_new_passes_the_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     _work_checkout(monkeypatch, tmp_path)
     bare = _bare_repo(tmp_path / "bare")
     seen: list = []
-    monkeypatch.setattr(cli, "_api_try", _repo_api(seen, repo=bare))
+    monkeypatch.setattr(cli, "_api_try", _forge_rows(_repo_api(seen, repo=bare)))
     _env(monkeypatch)
     main(["repo", "new", "heldso", "--owner", "apps", "--forge", "origin"])
     assert seen == [("POST", "/api/v1/repos", {"name": "heldso", "owner": "apps", "forge": "origin"})]

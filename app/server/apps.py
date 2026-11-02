@@ -637,11 +637,11 @@ async def check_repo(yard: Yard, repo: str) -> None:
 
 async def check_installation(yard: Yard, forge: Forge) -> None:
     """An installation event refreshes the saved installation. The push debounce applies."""
-    if _debounce(yard, f"installation:{forge.host}", lambda: _refresh_installation(yard, forge)):
-        await _refresh_installation(yard, forge)
+    if _debounce(yard, f"installation:{forge.host}", lambda: refresh_installations(yard, forge)):
+        await refresh_installations(yard, forge)
 
 
-def _debounce(yard: Yard, key: str, run: Callable[[], Awaitable[None]]) -> bool:
+def _debounce(yard: Yard, key: str, run: Callable[[], Awaitable[object]]) -> bool:
     """Leading plus trailing. True runs now; false queues one run at the end of the window."""
     if time.monotonic() - yard.checked.get(key, -_DEBOUNCE) < _DEBOUNCE:
         if key not in yard.queued:
@@ -659,12 +659,13 @@ async def _trailing(yard: Yard, key: str) -> None:
     await run()
 
 
-async def _refresh_installation(yard: Yard, forge: Forge) -> None:
+async def refresh_installations(yard: Yard, forge: Forge) -> str:
+    """Ask the forge for the app's installations and save them. Returns the error text, "" when it answered."""
     try:
         installations = await forge.find_installations()
     except YardError as exc:
         log.warning("%s installation: %s", forge.name, exc)
-        return
+        return str(exc)
     if installations:
         journal.send(
             yard.config,
@@ -674,6 +675,7 @@ async def _refresh_installation(yard: Yard, forge: Forge) -> None:
             accounts=",".join(str(entry.get("account") or "") for entry in installations),
             installations=",".join(str(entry.get("id") or "") for entry in installations),
         )
+    return ""
 
 
 async def _check_repo(yard: Yard, repo: str) -> None:
