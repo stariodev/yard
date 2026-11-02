@@ -934,7 +934,6 @@ async def test_deploy_is_a_job(yard):
         "image",
         "error",
         "previous",
-        "missing_env",
         "port",
     }
     assert fields <= set(job)

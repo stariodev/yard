@@ -28,7 +28,3 @@ def detect(repo: Repo, name: str) -> Plan | None:
             help_text="uv lock && git add uv.lock && git commit && git push",
         )
     return python.plan(repo, name, reason="stario: pyproject.toml declares stario")
-
-
-def settings(repo: Repo):
-    return python.settings(repo)

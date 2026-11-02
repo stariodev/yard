@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The settings hint is gone. Yard no longer reads the code of an app to guess the env keys it needs, and the deploy job has no `missing_env` field. The scan missed a key read through a helper such as `require_env(name)`, and the app log already names a missing key when the app stops.
+- `yard app new --edit-env` starts the editor from a template. With no value it reads the first of `.env.example`, `.env.sample`, `.env.template`, and `env.example` at the top of the checkout. `--edit-env PATH` reads that file instead. The `-e` and `--env-file` values come first, and the template adds the keys they do not set. A key left empty in the editor is not saved, and the CLI prints the `yard env set` command for it.
+
 ## 0.11.0
 
 - `yard repo new [NAME] [--owner] [--forge]` creates a private repo for the checkout, adds it as `origin`, and pushes the branch with your own git credentials. It needs a commit and no `origin` remote. It never runs `git add` or `git commit`.

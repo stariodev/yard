@@ -915,26 +915,6 @@ async def test_source_deploy_failed_is_not_retried(tmp_path: Path, monkeypatch: 
     assert recorder.calls
 
 
-async def test_deploy_hint_for_unset_required_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
-    clone = _stario_clone(yard, "heldso")
-    (clone / "app" / "config.py").parent.mkdir(exist_ok=True)
-    (clone / "app" / "config.py").write_text('import os\nA = os.environ["SECRET_KEY"]\nB = os.getenv("OPT")\n')
-    _connect(monkeypatch)
-    monkeypatch.setattr(compose, "apply", _Apply())
-
-    async def fake_sync(clone_, url, ref, token=""):
-        return git.head(clone)
-
-    monkeypatch.setattr(git, "sync", fake_sync)
-    outcome = await apps.deploy(yard, "heldso")
-    assert outcome.status == "ok"
-    lines = "\n".join(yard.deploys["heldso"].lines)
-    assert "hint: heldso reads settings that its env does not set:" in lines
-    assert "SECRET_KEY" in lines
-
-
 async def test_check_plan_failure_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A push app whose plan fails deploys once; the same tip is not retried."""
     yard = make_yard(tmp_path, skip=False)

@@ -61,6 +61,9 @@ TIMEOUT = 30
 
 FORGE_HINT = "No forge is connected. Run yard forge setup origin or yard forge setup github."
 
+# `app new --edit-env` with no PATH starts from the first of these at the top of the checkout.
+ENV_TEMPLATES = (".env.example", ".env.sample", ".env.template", "env.example")
+
 
 @dataclass(slots=True)
 class Client:
@@ -454,7 +457,7 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
     except YardError as exc:
         _fail(exc)
 
-    env = _new_app_env(args)
+    env = _new_app_env(args, name)
     session = _load(args)
     body: dict[str, object] = {"name": name, "repo": repo}
     if not repo_less:
@@ -504,7 +507,7 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
         _die(f"{name} was created, but the first deploy failed.")
 
 
-def _new_app_env(args: argparse.Namespace) -> dict[str, str]:
+def _new_app_env(args: argparse.Namespace, name: str) -> dict[str, str]:
     """The env for `app new`: --env-file, then -e pairs, then --edit-env on top."""
     env: dict[str, str] = {}
     try:
@@ -512,15 +515,45 @@ def _new_app_env(args: argparse.Namespace) -> dict[str, str]:
             env.update(parse_env(Path(args.env_file).read_text()))
         for pair in args.env or []:
             env.update(parse_env(pair))
-        if args.edit_env:
+        if args.edit_env is not None:
             if not sys.stdin.isatty():
                 _die("--edit-env needs a terminal. Use -e KEY=VALUE or --env-file PATH instead.")
-            env = parse_env(_edit_text(format_env(env)))
+            env = parse_env(_edit_text(_env_draft(env, _env_template(args.edit_env))))
+            empty = [key for key, value in env.items() if not value]
+            if empty:
+                env = {key: value for key, value in env.items() if value}
+                print(f"These keys are empty, so they are not saved: {', '.join(empty)}", file=sys.stderr)
+                print(f"Set them: yard env set --app {name} {' '.join(f'{k}=\u2026' for k in empty)}", file=sys.stderr)
     except OSError as exc:
-        _die(f"cannot read {args.env_file}: {exc.strerror or exc}")
+        _die(f"cannot read {exc.filename}: {exc.strerror or exc}")
     except YardError as exc:
         _fail(exc)
     return env
+
+
+def _env_template(path: str) -> str:
+    """The named file, or else the first env template at the top of the checkout. Empty when none."""
+    if path:
+        return Path(path).read_text()
+    top = Path(_git_out("rev-parse", "--show-toplevel") or ".")
+    for name in ENV_TEMPLATES:
+        if (top / name).is_file():
+            return (top / name).read_text()
+    return ""
+
+
+def _env_draft(env: dict[str, str], template: str) -> str:
+    """The editor text: the env as KEY=value lines, then the template lines for the keys it does not set."""
+    rest = [
+        line
+        for line in template.splitlines()
+        if line.lstrip().startswith("#") or line.strip().removeprefix("export ").partition("=")[0].strip() not in env
+    ]
+    while rest and not rest[0].strip():
+        rest.pop(0)
+    if not rest:
+        return format_env(env)
+    return format_env(env) + ("\n" if env else "") + "\n".join(rest) + "\n"
 
 
 def _maybe_bind(session, host: str, name: str, port: int, window: str) -> None:
@@ -1514,7 +1547,14 @@ def _app_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
     new.add_argument("--no-deploy", action="store_true", help="create the app without a first deploy")
     new.add_argument("-e", "--env", action="append", default=[], metavar="KEY=VALUE", help="a setting the app reads")
     new.add_argument("--env-file", metavar="PATH", default="", help="a dotenv file of settings")
-    new.add_argument("--edit-env", action="store_true", help="edit the settings in $EDITOR first")
+    new.add_argument(
+        "--edit-env",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help=f"edit the settings in $EDITOR first, starting from PATH or {ENV_TEMPLATES[0]} in the checkout",
+    )
     new.add_argument(
         "--runs", default="", help="auto, a path in the repo, yard:<template>, an image name:tag, or an https URL"
     )

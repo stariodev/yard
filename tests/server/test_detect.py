@@ -306,53 +306,6 @@ def test_plan_for_path_classifies(tmp_path: Path):
         detect.plan_for(tmp_path, "heldso", "ops/missing.yml")
 
 
-def _settings(tmp_path: Path, body: str, rel: str = "app/config.py"):
-    _write(tmp_path, "pyproject.toml", '[project]\nrequires-python=">=3.14"\n')
-    _write(tmp_path, "main.py")
-    _write(tmp_path, rel, body)
-    return {s.key: (s.required, s.where) for s in detect.settings(tmp_path)}
-
-
-def test_settings_scan(tmp_path: Path):
-    found = _settings(
-        tmp_path,
-        "import os\n"
-        'A = os.environ["GOOGLE_CLIENT_ID"]\n'
-        'B = os.environ.get("OPT", "x")\n'
-        'C = os.getenv("NO_DEFAULT")\n'
-        'D = os.environ["PROJECT_NAME"]\n',
-    )
-    assert found["GOOGLE_CLIENT_ID"] == (True, "app/config.py:2")
-    assert found["OPT"] == (False, "app/config.py:3")
-    assert found["NO_DEFAULT"] == (False, "app/config.py:4")
-    assert "PROJECT_NAME" not in found
-
-
-def test_settings_environ_alias_and_required_wins(tmp_path: Path):
-    found = _settings(
-        tmp_path,
-        'from os import environ\nA = environ.get("K")\nB = environ["K"]\n',
-    )
-    assert found["K"] == (True, "app/config.py:3")
-
-
-def test_settings_skips_dirs_and_bad_files(tmp_path: Path):
-    _write(tmp_path, "pyproject.toml", '[project]\nrequires-python=">=3.14"\n')
-    _write(tmp_path, "main.py")
-    _write(tmp_path, "tests/t.py", 'import os\nX = os.environ["IN_TESTS"]\n')
-    _write(tmp_path, ".hidden/x.py", 'import os\nX = os.environ["IN_HIDDEN"]\n')
-    _write(tmp_path, "app/broken.py", "def (:\n")
-    found = detect.settings(tmp_path)
-    assert [s.key for s in found] == []
-
-
-def test_settings_empty_for_ambiguous(tmp_path: Path):
-    _write(tmp_path, "pyproject.toml", '[project]\nname="x"\n')
-    _write(tmp_path, "main.py", 'import os\nA = os.environ["K"]\n')
-    _write(tmp_path, "package.json", "{}")
-    assert detect.settings(tmp_path) == []
-
-
 def test_http_nu(tmp_path: Path):
     _write(tmp_path, "serve.nu", "{|req| 'hi'}\n")
     resolved = detect.resolve(tmp_path, "xs-app")
@@ -406,18 +359,3 @@ def test_plan_for_http_nu(tmp_path: Path):
     (tmp_path / "serve.nu").unlink()
     with pytest.raises(YardError, match="yard:http-nu does not fit this repo"):
         detect.plan_for(tmp_path, "xs-app", "yard:http-nu")
-
-
-def test_http_nu_settings(tmp_path: Path):
-    _write(tmp_path, "serve.nu", "{|req| $env.SECRET}\n")
-    _write(
-        tmp_path,
-        "lib/util.nu",
-        "$env.OPT?\n$env.SECRET = 'x'\n# $env.COMMENTED\n$env.PATH\n$env.PROJECT_NAME\n",
-    )
-    _write(tmp_path, "store/data.nu", "$env.IN_STORE\n")
-    found = {s.key: (s.required, s.where) for s in detect.settings(tmp_path)}
-    assert found == {
-        "SECRET": (True, "serve.nu:1"),
-        "OPT": (False, "lib/util.nu:1"),
-    }
