@@ -6,13 +6,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # One external tool each, plus the store. They never know the Yard object or HTTP.
-ADAPTERS = {"caddy", "compose", "forges", "git", "journal", "podman", "store"}
+ADAPTERS = {"caddy", "compose", "detect", "forges", "git", "journal", "podman", "sources", "store"}
 
 # Domain work. They call adapters and the store through the Yard object; never HTTP.
-SERVICES = {"apps", "binds", "doctor", "logfilter", "repos", "status"}
+SERVICES = {"apps", "doctor", "logfilter", "repos", "sites", "status"}
 
 # main is the composition root: the only file that may import the api.
 COMPOSITION = {"main", "api"}
+
+# The dependencies and runtime state; services import it, adapters never do.
+STATE = {"yard"}
 
 
 def _imports(source: str) -> set[str]:
@@ -38,7 +41,9 @@ def _deps(package: str) -> dict[str, set[str]]:
 
 
 def _module(file: str) -> str:
-    return Path(file).stem
+    """The layer name: the module under app/server, or its package (detect/python.py is detect)."""
+    parts = Path(file).relative_to("app/server").parts
+    return Path(parts[0]).stem
 
 
 def _adapter_violations(deps: set[str]) -> set[str]:
@@ -67,6 +72,16 @@ def test_server_never_imports_the_cli():
     for file, deps in _deps("server").items():
         bad = {name for name in deps if name.startswith("app.cli")}
         assert not bad, f"{file}: {bad}"
+
+
+def test_every_server_module_has_one_layer():
+    layers = [ADAPTERS, SERVICES, COMPOSITION, STATE]
+    for file in _deps("server"):
+        module = _module(file)
+        if module == "__init__":
+            continue
+        count = sum(module in layer for layer in layers)
+        assert count == 1, f"{file}: in {count} layers"
 
 
 def test_adapters_never_import_services_yard_or_api():

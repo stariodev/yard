@@ -1,4 +1,6 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from stario.testing import TestClient
@@ -6,19 +8,28 @@ from stario.testing import TestClient
 from app.server.main import bootstrap
 
 
-@pytest.fixture
-async def yard(tmp_path, monkeypatch):
-    """The API over TestClient. No podman, no boot steps, no deploys."""
+@asynccontextmanager
+async def serve(
+    tmp_path: Path, monkeypatch, *, journalctl: str = "journalctl-missing", journal_dir: str = "no-journal", timeout=5
+):
+    """The production bootstrap over TestClient. No podman, no boot steps, no deploys.
+
+    A Linux runner has a real journal; the journal dir and socket always point into tmp_path.
+    """
     monkeypatch.setenv("YARD_ROOT", str(tmp_path))
     monkeypatch.setenv("YARD_SKIP_DEPLOY", "1")
     monkeypatch.setenv("YARD_BOOT", "0")
     monkeypatch.setenv("YARD_PODMAN_BIN", "yard-podman-missing")
-    # A Linux runner has a real journal; the tests must never reach it.
-    monkeypatch.setenv("YARD_JOURNAL_DIR", str(tmp_path / "no-journal"))
+    monkeypatch.setenv("YARD_JOURNAL_DIR", str(tmp_path / journal_dir))
     monkeypatch.setenv("YARD_JOURNAL_SOCKET", str(tmp_path / "no-journal.sock"))
-    monkeypatch.setenv("YARD_JOURNALCTL_BIN", "journalctl-missing")
-    async with TestClient(bootstrap, request_timeout=5) as client:
-        token = (tmp_path / "tokens" / "admin.token").read_text().strip()
+    monkeypatch.setenv("YARD_JOURNALCTL_BIN", journalctl)
+    async with TestClient(bootstrap, request_timeout=timeout) as client:
+        yield client, (tmp_path / "tokens" / "admin.token").read_text().strip()
+
+
+@pytest.fixture
+async def yard(tmp_path, monkeypatch):
+    async with serve(tmp_path, monkeypatch) as (client, token):
         yield client, token, tmp_path
 
 

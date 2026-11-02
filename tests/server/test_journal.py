@@ -9,13 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from stario.testing import TestClient
 
 from app.server import journal
-from app.server.main import bootstrap
 from app.server.store import Config
 from app.shared import YardError
-from tests.conftest import auth
+from tests.conftest import auth, serve
+from tests.server.conftest import make_config
 
 WHEN = datetime(2025, 10, 5, 21, 0, 0, tzinfo=UTC)
 MICROS = str(int(WHEN.timestamp() * 1_000_000))
@@ -62,13 +61,8 @@ YARD_DEPLOY = json.dumps(
 
 
 def _config(tmp_path: Path, journalctl: Path, journal_socket: Path | None = None) -> Config:
-    return Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="yard-podman-missing",
-        skip_deploy=True,
-        boot=False,
-        remote=False,
+    return make_config(
+        tmp_path,
         journal_dir=tmp_path / "journal",
         journalctl_bin=str(journalctl),
         journal_socket=journal_socket or (tmp_path / "no-socket"),
@@ -253,14 +247,7 @@ def test_send_never_raises(tmp_path: Path, capsys):
 @pytest.fixture
 async def yard_journal(tmp_path, monkeypatch):
     script, argv_log = _journalctl(tmp_path, out=ENTRY + "\n")
-    monkeypatch.setenv("YARD_ROOT", str(tmp_path))
-    monkeypatch.setenv("YARD_SKIP_DEPLOY", "1")
-    monkeypatch.setenv("YARD_BOOT", "0")
-    monkeypatch.setenv("YARD_PODMAN_BIN", "yard-podman-missing")
-    monkeypatch.setenv("YARD_JOURNAL_DIR", str(tmp_path / "journal"))
-    monkeypatch.setenv("YARD_JOURNALCTL_BIN", str(script))
-    async with TestClient(bootstrap, request_timeout=5) as client:
-        token = (tmp_path / "tokens" / "admin.token").read_text().strip()
+    async with serve(tmp_path, monkeypatch, journalctl=str(script), journal_dir="journal") as (client, token):
         yield client, token, argv_log, tmp_path / "out"
 
 
@@ -379,14 +366,7 @@ async def yard_cursor(tmp_path, monkeypatch):
         for n in range(5)
     ]
     script, argv_log = _cursor_journalctl(tmp_path, entries)
-    monkeypatch.setenv("YARD_ROOT", str(tmp_path))
-    monkeypatch.setenv("YARD_SKIP_DEPLOY", "1")
-    monkeypatch.setenv("YARD_BOOT", "0")
-    monkeypatch.setenv("YARD_PODMAN_BIN", "yard-podman-missing")
-    monkeypatch.setenv("YARD_JOURNAL_DIR", str(tmp_path / "journal"))
-    monkeypatch.setenv("YARD_JOURNALCTL_BIN", str(script))
-    async with TestClient(bootstrap, request_timeout=5) as client:
-        token = (tmp_path / "tokens" / "admin.token").read_text().strip()
+    async with serve(tmp_path, monkeypatch, journalctl=str(script), journal_dir="journal") as (client, token):
         yield client, token, argv_log
 
 
@@ -648,14 +628,7 @@ def _filter_entries() -> list[dict]:
 async def yard_filtered(tmp_path, monkeypatch):
     """The API over a journal of two traces, a text line, and a lone JSON line."""
     script, argv_log = _cursor_journalctl(tmp_path, _filter_entries())
-    monkeypatch.setenv("YARD_ROOT", str(tmp_path))
-    monkeypatch.setenv("YARD_SKIP_DEPLOY", "1")
-    monkeypatch.setenv("YARD_BOOT", "0")
-    monkeypatch.setenv("YARD_PODMAN_BIN", "yard-podman-missing")
-    monkeypatch.setenv("YARD_JOURNAL_DIR", str(tmp_path / "journal"))
-    monkeypatch.setenv("YARD_JOURNALCTL_BIN", str(script))
-    async with TestClient(bootstrap, request_timeout=5) as client:
-        token = (tmp_path / "tokens" / "admin.token").read_text().strip()
+    async with serve(tmp_path, monkeypatch, journalctl=str(script), journal_dir="journal") as (client, token):
         yield client, token, argv_log
 
 
@@ -799,14 +772,10 @@ async def yard_trickle(tmp_path, monkeypatch):
     )
     script.chmod(0o755)
     (tmp_path / "journal").mkdir()
-    monkeypatch.setenv("YARD_ROOT", str(tmp_path))
-    monkeypatch.setenv("YARD_SKIP_DEPLOY", "1")
-    monkeypatch.setenv("YARD_BOOT", "0")
-    monkeypatch.setenv("YARD_PODMAN_BIN", "yard-podman-missing")
-    monkeypatch.setenv("YARD_JOURNAL_DIR", str(tmp_path / "journal"))
-    monkeypatch.setenv("YARD_JOURNALCTL_BIN", str(script))
-    async with TestClient(bootstrap, request_timeout=15) as client:
-        token = (tmp_path / "tokens" / "admin.token").read_text().strip()
+    async with serve(tmp_path, monkeypatch, journalctl=str(script), journal_dir="journal", timeout=15) as (
+        client,
+        token,
+    ):
         yield client, token, argv_log
 
 

@@ -6,42 +6,22 @@ from pathlib import Path
 import pytest
 
 from app.server import status
-from app.server.podman import Podman
-from app.server.store import App, Config, Deployed, Store
+from app.server.store import App, Deployed, Store
 from app.server.yard import Yard
-from tests.server.conftest import FakeCaddy
+from tests.server.conftest import FakeCaddy, FakePodman, make_config, make_yard
 
 
 def _yard(tmp_path: Path, ps: list[dict], stats: str = "[]", *, sock: bool = False, logs: str = "") -> Yard:
-    config = Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="podman",
-        skip_deploy=True,
-        boot=sock,
-        remote=False,
-        journal_dir=tmp_path / "no-journal",
-        journalctl_bin="journalctl-missing",
-        journal_socket=tmp_path / "no-journal.sock",
+    yard = make_yard(tmp_path, podman_bin="podman", boot=sock)
+
+    yard.podman = FakePodman(
+        {
+            "ps": json.dumps(ps),
+            "stats": stats,
+            "info": '{"host":{"cpus":4,"memTotal":1000},"store":{"graphRootAllocated":2000}}',
+            "logs": logs,
+        }
     )
-    store = Store.open(tmp_path)
-    yard = Yard(config, store)
-
-    class _Fake(Podman):
-        async def run(
-            self, *args: str, timeout: float | None = 20, env: dict | None = None, stdin: bytes | None = None
-        ) -> str:
-            if args and args[0] == "ps":
-                return json.dumps(ps)
-            if args and args[0] == "stats":
-                return stats
-            if args and args[0] == "info":
-                return '{"host":{"cpus":4,"memTotal":1000},"store":{"graphRootAllocated":2000}}'
-            if args and args[0] == "logs":
-                return logs
-            return "[]"
-
-    yard.podman = _Fake("podman", False)
     return yard
 
 
@@ -197,17 +177,7 @@ def test_url_row_shows_the_record_revision(tmp_path):
     app = Store.open(tmp_path).create_app("umami", "", runs="https://example.com/umami.yml")
     revision = "sha256:" + "b" * 64
     plan = status.running_plan(app, _listed(_deploy("umami", revision, runs=app.runs, kind="compose")))
-    config = Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="",
-        skip_deploy=True,
-        boot=False,
-        remote=False,
-        journal_dir=tmp_path / "j",
-        journalctl_bin="",
-        journal_socket=tmp_path / "s.sock",
-    )
+    config = make_config(tmp_path)
     item = Container(name="umami-app-1", image="postgres:17", app="umami", running=True, state="running")
     row = status._row(config, item, app, None, Tip(revision="sha256:" + "c" * 64), plan, None, [], {})
     assert row.sha == revision

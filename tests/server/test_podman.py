@@ -1,6 +1,14 @@
 from datetime import UTC, datetime
 
-from app.server.podman import parse_health, parse_images, parse_info, parse_ps, parse_stats, parse_system_df
+from app.server.podman import (
+    parse_health,
+    parse_images,
+    parse_info,
+    parse_port,
+    parse_ps,
+    parse_stats,
+    parse_system_df,
+)
 from app.shared import stamp as format_stamp
 
 
@@ -131,3 +139,9 @@ def test_parse_ps_keeps_the_yard_labels_of_a_deploy_container():
     got = parse_ps(raw)
     assert got["deploy-heldso"].labels == {"sha": "abc", "cause": "push"}
     assert got["heldso-app-1"].labels == {}
+
+
+def test_parse_port():
+    assert parse_port('[{"Config": {"ExposedPorts": {"3001/tcp": {}}}}]') == 3001
+    assert parse_port('[{"Config": {"ExposedPorts": {"3001/tcp": {}, "80/tcp": {}}}}]') == 0
+    assert parse_port("[]") == 0

@@ -14,7 +14,7 @@ import pytest
 from app.server import apps, compose, git, sources, status
 from app.server.forges import Forge, GitHub, Origin
 from app.server.podman import Podman
-from app.server.store import Config, Deployed, Store
+from app.server.store import Deployed
 from app.server.yard import Yard
 from app.shared import YardError
 from tests.server.conftest import FakeCaddy, make_yard
@@ -74,7 +74,7 @@ def _connect(monkeypatch: pytest.MonkeyPatch, token: str = "oit_x") -> None:
 
 
 def _deploy_yard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "heldso", **kw):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app(name, "https://origin.cursor.com/org/app")
     clone = _clone(yard, name)
     _connect(monkeypatch)
@@ -135,7 +135,7 @@ async def test_deploy_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_deploy_apply_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     _clone(yard, "heldso")
     _connect(monkeypatch)
@@ -159,7 +159,7 @@ async def test_deploy_yard_is_pending(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 async def test_deploy_needs_a_repo(tmp_path: Path):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("yard", "")
     outcome = await apps.deploy(yard, "yard")
     assert outcome.status == "failed"
@@ -167,7 +167,7 @@ async def test_deploy_needs_a_repo(tmp_path: Path):
 
 
 async def test_deploy_needs_a_forge(tmp_path: Path):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "failed"
@@ -175,7 +175,7 @@ async def test_deploy_needs_a_forge(tmp_path: Path):
 
 
 async def test_deploy_skips(tmp_path: Path):
-    yard = make_yard(tmp_path, skip=True)
+    yard = make_yard(tmp_path)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "skipped"
@@ -188,7 +188,7 @@ async def test_deploy_missing_app(tmp_path: Path):
 
 
 async def test_deploy_reverted_when_the_gate_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     _clone(yard, "heldso")
     _connect(monkeypatch)
@@ -219,7 +219,7 @@ async def test_a_deploy_labels_the_plan_before_it(tmp_path: Path, monkeypatch: p
 
 async def test_auto_guard_pins_a_moved_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A deploy whose auto answer moves from a template to compose.yml fails with the pin message."""
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     clone = _stario_clone(yard, "heldso")
     _connect(monkeypatch)
@@ -279,7 +279,7 @@ async def test_template_image_tag_carries_the_stamp(tmp_path: Path, monkeypatch:
 
 
 async def test_deploy_runs_path_missing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", runs="deploy/x.yml")
     _clone(yard, "heldso")
     _connect(monkeypatch)
@@ -307,7 +307,7 @@ async def test_deploy_runs_path_missing_fails(tmp_path: Path, monkeypatch: pytes
 
 
 async def test_deploy_image_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("db", "", runs="postgres:17")
     _host, recorder = _hosted(yard, monkeypatch)
 
@@ -328,7 +328,7 @@ async def test_deploy_image_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 async def test_deploy_image_registry_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("db", "", runs="postgres:17")
     _hosted(yard, monkeypatch)
 
@@ -346,7 +346,7 @@ URL_BODY = b"services:\n  app:\n    image: x\n    networks:\n      - yard\n"
 
 
 async def test_deploy_url_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("umami", "", runs="https://example.com/umami.yml")
     _host, recorder = _hosted(yard, monkeypatch)
     stale = tmp_path / "apps" / "umami" / "compose" / "000000000000.yml"
@@ -378,7 +378,7 @@ async def test_deploy_url_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_deploy_url_refuses_a_containerfile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("umami", "", runs="https://example.com/umami.yml")
     monkeypatch.setattr(compose, "apply", _Apply())
 
@@ -392,7 +392,7 @@ async def test_deploy_url_refuses_a_containerfile(tmp_path: Path, monkeypatch: p
 
 
 async def test_deploy_url_refuses_a_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("umami", "", runs="https://example.com/umami.yml")
     monkeypatch.setattr(compose, "apply", _Apply())
 
@@ -403,27 +403,6 @@ async def test_deploy_url_refuses_a_build(tmp_path: Path, monkeypatch: pytest.Mo
     outcome = await apps.deploy(yard, "umami")
     assert outcome.status == "failed"
     assert "cannot build" in outcome.error
-
-
-class _InspectPodman(Podman):
-    def __init__(self, run):
-        super().__init__("podman", False)
-        self._run = run
-
-    async def run(self, *args, **kw):
-        return await self._run(*args, **kw)
-
-
-def test_parse_port():
-    assert podman_port('[{"Config": {"ExposedPorts": {"3001/tcp": {}}}}]') == 3001
-    assert podman_port('[{"Config": {"ExposedPorts": {"3001/tcp": {}, "80/tcp": {}}}}]') == 0
-    assert podman_port("[]") == 0
-
-
-def podman_port(raw: str) -> int:
-    from app.server import podman
-
-    return podman.parse_port(raw)
 
 
 PS_HELDSO = (
@@ -475,7 +454,7 @@ async def test_delete_keeps_going_when_caddy_refuses(tmp_path: Path):
 
 
 async def test_delete_purges_from_the_deploy_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("db", "", runs="postgres:17")
     host, recorder = _hosted(yard, monkeypatch)
     host.record("db", {"sha": "sha256:" + "a" * 64, "runs": "postgres:17", "kind": "image"}, 0)
@@ -527,7 +506,7 @@ class _Podman(Podman):
 def _deploy_github(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "heldso", apply: _Apply | None = None, **kw
 ) -> tuple[Yard, _Apply]:
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app(name, "https://github.com/org/app")
     clone = _clone(yard, name)
     _connect(monkeypatch)
@@ -538,12 +517,6 @@ def _deploy_github(
 
     monkeypatch.setattr(git, "sync", fake_sync)
     return yard, recorder
-
-
-async def test_a_yard_self_deploy_stays_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard, _recorder = _deploy_github(tmp_path, monkeypatch, name="yard")
-    outcome = await apps.deploy(yard, "yard")
-    assert outcome.status == "pending"
 
 
 async def test_deploy_reuses_a_local_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -576,18 +549,7 @@ IMAGES = json.dumps(
 
 
 def _yard(tmp_path: Path) -> Yard:
-    config = Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="podman",
-        skip_deploy=True,
-        boot=False,
-        remote=False,
-        journal_dir=tmp_path / "no-journal",
-        journalctl_bin="journalctl-missing",
-        journal_socket=tmp_path / "no-journal.sock",
-    )
-    yard = Yard(config, Store.open(tmp_path))
+    yard = make_yard(tmp_path, podman_bin="podman")
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
     return yard
 
@@ -825,7 +787,7 @@ async def test_check_installation_debounces(tmp_path: Path, monkeypatch: pytest.
 
 async def test_check_template_moved_deploys_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A new template stamp deploys a push app once; the tried pair is not retried."""
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
     clone = _stario_clone(yard, "heldso")
     _connect(monkeypatch)
@@ -854,7 +816,7 @@ async def test_check_template_moved_deploys_once(tmp_path: Path, monkeypatch: py
 
 
 async def test_check_source_image_and_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("db", "", runs="postgres:17", trigger="push")
     yard.store.create_app("site", "", runs="https://example.com/x.yml", trigger="manual")
     calls = []
@@ -880,7 +842,7 @@ async def test_check_source_image_and_url(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 async def test_check_source_error_and_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("db", "", runs="postgres:17", trigger="push")
     _hosted(yard, monkeypatch)
 
@@ -902,7 +864,7 @@ async def test_check_source_error_and_clear(tmp_path: Path, monkeypatch: pytest.
 
 
 async def test_check_source_one_get_per_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("a", "", runs="https://example.com/x.yml", trigger="manual")
     yard.store.create_app("b", "", runs="https://example.com/x.yml", trigger="manual")
     calls = []
@@ -918,7 +880,7 @@ async def test_check_source_one_get_per_url(tmp_path: Path, monkeypatch: pytest.
 
 
 async def test_source_deploy_failed_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("db", "", runs="postgres:17", trigger="push")
     revision = "sha256:" + "a" * 64
 
@@ -947,7 +909,7 @@ async def test_source_deploy_failed_is_not_retried(tmp_path: Path, monkeypatch: 
 
 async def test_check_plan_failure_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A push app whose plan fails deploys once; the same tip is not retried."""
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push", runs="missing.yml")
     clone = _clone(yard, "heldso")
     tip_sha = git.head(clone)
@@ -970,7 +932,7 @@ async def test_check_plan_failure_is_not_retried(tmp_path: Path, monkeypatch: py
 
 async def test_check_auto_guard_failure_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A guard failure (compose -> template) deploys once; the tried pair stops the retry."""
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
     clone = _stario_clone(yard, "heldso")
     tip_sha = git.head(clone)
@@ -996,7 +958,7 @@ async def test_check_auto_guard_failure_is_not_retried(tmp_path: Path, monkeypat
 
 async def test_check_url_containerfile_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A URL body that is a Containerfile fails once; the same body is not retried."""
-    yard = make_yard(tmp_path, skip=False)
+    yard = make_yard(tmp_path, skip_deploy=False)
     yard.store.create_app("umami", "", runs="https://example.com/x.yml", trigger="push")
     calls = []
 

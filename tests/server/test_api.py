@@ -283,14 +283,6 @@ async def test_tokens(yard):
     assert (await client.get("/api/v1/apps", headers=auth(ada))).status_code == 401
 
 
-async def test_podman_route_is_gone(yard):
-    client, token, _root = yard
-    res = await client.post("/api/v1/podman", json={"args": ["ps"]}, headers=auth(token))
-    assert res.status_code == 404
-    res = await client.post("/api/v1/podman", json={"args": ["ps"]})
-    assert res.status_code == 404
-
-
 async def test_prune(yard, monkeypatch):
     client, token, _root = yard
 

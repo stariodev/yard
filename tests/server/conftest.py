@@ -1,29 +1,60 @@
 """Service-level helpers: a Yard on a temp root, and a fake Caddy admin."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from app.server.caddy import Caddy
+from app.server.podman import Podman
 from app.server.store import Config, Store
 from app.server.yard import Yard
 from app.shared import YardError
 
 
-def make_yard(
-    tmp_path: Path, *, skip: bool = True, boot: bool = False, podman_bin: str = "yard-podman-missing"
-) -> Yard:
+def make_config(tmp_path: Path, **overrides) -> Config:
+    """A Config on tmp_path. The journal dir and socket point at nowhere unless a test overrides them."""
     config = Config(
         root=tmp_path,
         podman_sock="",
-        podman_bin=podman_bin,
-        skip_deploy=skip,
-        boot=boot,
+        podman_bin="yard-podman-missing",
+        skip_deploy=True,
+        boot=False,
         remote=False,
         journal_dir=tmp_path / "no-journal",
         journalctl_bin="journalctl-missing",
         journal_socket=tmp_path / "no-journal.sock",
     )
-    return Yard(config, Store.open(tmp_path))
+    return replace(config, **overrides)
+
+
+def make_yard(tmp_path: Path, **overrides) -> Yard:
+    return Yard(make_config(tmp_path, **overrides), Store.open(tmp_path))
+
+
+class FakePodman(Podman):
+    """Podman, faked. Each answer is keyed by a command prefix ("ps", "system df"); the longest prefix wins.
+
+    An answer is the text podman prints, or an exception to raise. A command with no answer prints `default`.
+    """
+
+    def __init__(self, answers: dict[str, str | Exception] | None = None, default: str = "[]") -> None:
+        super().__init__("podman", False)
+        self.answers = answers or {}
+        self.default = default
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run(self, *args: str, timeout: float | None = 20) -> str:
+        self.calls.append(args)
+        line = " ".join(args)
+        keys = [key for key in self.answers if not key or line == key or line.startswith(key + " ")]
+        answer = self.answers[max(keys, key=len)] if keys else self.default
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def dead_podman() -> FakePodman:
+    return FakePodman(default="", answers={"": YardError(502, "podman", "podman is down")})
 
 
 class FakeCaddy(Caddy):
