@@ -225,6 +225,16 @@ def _bad_trigger(text: str) -> NoReturn:
     )
 
 
+def app_container(name: str) -> str:
+    """Compose names the one app container `<project>-app-1`."""
+    return f"{name}-app-1"
+
+
+def deploy_container(name: str) -> str:
+    """The apply container of the last deploy. Its log is the deploy log."""
+    return f"deploy-{name}"
+
+
 def default_site(hosts: list[str], dial: str, window: str = "10s") -> str:
     """The default Caddy site: every host to one container. Caddy holds requests for `window` during a swap."""
     return (

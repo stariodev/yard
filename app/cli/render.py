@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
-from app.shared import ago, duration, format_bytes, parse
+from app.shared import ago, app_container, duration, format_bytes, parse
 
 # --- the tables ------------------------------------------------------------
 
@@ -137,7 +137,7 @@ def status_hint(report: dict) -> str:
         # The state word without its age drives the hint.
         word = _state_text(row, datetime.now(UTC)).split(" ", 1)[0]
         if not hint and word in {"failed", "down", "unhealthy", "exit", "OOM"}:
-            container = str(row.get("container") or "") or f"{app}-app-1"
+            container = str(row.get("container") or "") or app_container(app)
             hint = f"yard logs {container}"
     return hint
 

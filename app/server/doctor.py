@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from app.server import compose, journal, podman, sites, status
+from app.server import journal, podman, sites, status
 from app.server.forges import Forge
 from app.server.store import Config
-from app.shared import YardError, age, duration, format_bytes, parse
+from app.shared import YardError, age, app_container, duration, format_bytes, parse
 
 if TYPE_CHECKING:
     from app.server.yard import Yard
@@ -249,7 +249,7 @@ async def _healthchecks(yard: Yard) -> list[Check]:
     for app in yard.store.list_apps():
         if app.name == "yard":
             continue
-        container = compose.app_container(app.name)
+        container = app_container(app.name)
         try:
             found = podman.parse_health(await yard.podman.run("inspect", container, "--format", "json"))
         except YardError:

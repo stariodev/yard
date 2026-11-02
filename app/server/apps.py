@@ -15,7 +15,7 @@ from app.server.detect import Plan
 from app.server.forges import Forge
 from app.server.store import App, Config, Deployed, read_deployed, write_deployed
 from app.server.yard import Job, Tip, Yard
-from app.shared import YardError, atomic_write, clone_url, ensure_file, now, parse_runs
+from app.shared import YardError, app_container, atomic_write, clone_url, deploy_container, ensure_file, now, parse_runs
 
 log = logging.getLogger("yard")
 
@@ -326,7 +326,7 @@ async def _deploy_source(yard: Yard, app: App, kind: str, job: Job, *, cause: st
     if kind == "image" and previous and previous != image:
         project.env["PREVIOUS_IMAGE"] = previous
     if kind == "compose" and previous_deployed is not None:
-        previous_copy = config.app_dir(app.name) / "compose" / f"{previous_deployed.revision[7:19]}.yml"
+        previous_copy = config.compose_copy(app.name, previous_deployed.revision)
         if previous_copy.is_file():
             project.env["PREVIOUS_COMPOSE_FILE"] = str(previous_copy)
     code, _text = await compose.apply(config, app.name, "up", project, on_line=job.push)
@@ -340,24 +340,21 @@ async def _deploy_source(yard: Yard, app: App, kind: str, job: Job, *, cause: st
     if outcome.status == "ok":
         write_deployed(config, app.name, Deployed(revision=revision, runs=app.runs, kind=kind))
         if kind == "compose":
-            _prune_copies(config, app.name, revision[7:19])
+            _prune_copies(config.compose_copy(app.name, revision))
         outcome.port = await _exposed_port(yard, app.name)
     return outcome
 
 
-def _write_copy(config: Config, name: str, revision: str, body: bytes) -> Path:
-    directory = config.app_dir(name) / "compose"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{revision[7:19]}.yml"
+def _write_copy(config: Config, name: str, revision: str, body: bytes) -> None:
+    path = config.compose_copy(name, revision)
+    path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(path, body.decode("utf-8", "replace"))
-    return path
 
 
-def _prune_copies(config: Config, name: str, keep: str) -> None:
+def _prune_copies(keep: Path) -> None:
     """Keep the current URL copy and the newest one before it, for the revert."""
-    directory = config.app_dir(name) / "compose"
     others = sorted(
-        (p for p in directory.glob("*.yml") if p.stem != keep),
+        (p for p in keep.parent.glob("*.yml") if p != keep),
         key=lambda p: p.stat().st_mtime_ns,
         reverse=True,
     )
@@ -368,7 +365,7 @@ def _prune_copies(config: Config, name: str, keep: str) -> None:
 async def _exposed_port(yard: Yard, name: str) -> int:
     """The one tcp port the running app container exposes; 0 when it is not exactly one."""
     try:
-        return podman.parse_port(await yard.podman.run("inspect", compose.app_container(name), "--format", "json"))
+        return podman.parse_port(await yard.podman.run("inspect", app_container(name), "--format", "json"))
     except Exception:
         return 0
 
@@ -384,7 +381,7 @@ def _deploy_end(yard: Yard, app: App, sha: str, outcome: Outcome) -> None:
         image=outcome.image,
         status=outcome.status,
         previous=outcome.previous,
-        container=f"deploy-{app.name}",
+        container=deploy_container(app.name),
         error=(outcome.error.splitlines() or [""])[0],
     )
 
@@ -461,7 +458,7 @@ def app_file(config: Config, app: App, which: str) -> str:
             raise YardError(404, "no_file", f"{app.name} has no compose file yet", help_text=deploy)
         if deployed.kind == "compose":
             if deployed.runs.startswith("https://"):
-                path = config.app_dir(app.name) / "compose" / f"{deployed.revision[7:19]}.yml"
+                path = config.compose_copy(app.name, deployed.revision)
                 if path.is_file():
                     return path.read_text()
                 raise YardError(404, "no_file", f"{app.name}'s compose copy is missing", help_text=deploy)
@@ -540,7 +537,7 @@ async def _running_image(yard: Yard, name: str) -> str:
         listed = podman.parse_ps(await yard.podman.run("ps", "--format", "json"))
     except YardError:
         return ""
-    item = listed.get(compose.app_container(name))
+    item = listed.get(app_container(name))
     return item.image if item and item.running else ""
 
 
