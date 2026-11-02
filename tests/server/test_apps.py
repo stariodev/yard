@@ -98,7 +98,13 @@ def _hosted(yard: Yard, monkeypatch: pytest.MonkeyPatch, apply: _Apply | None = 
     async def fake_record(config, name, labels, lines):
         host.record(name, labels, 1)
 
+    async def fake_follow(config, name, on_line):
+        host.events.append(("follow", name))
+        on_line("== the running deploy")
+        host.finish(name, 0)
+
     monkeypatch.setattr(compose, "record_failure", fake_record)
+    monkeypatch.setattr(compose, "follow", fake_follow)
     return host, recorder
 
 
@@ -486,9 +492,18 @@ class _Podman(Podman):
         super().__init__("podman", False)
         self.containers: list[dict] = json.loads(ps)
         self.has_image = has_image
+        # ("run", app) for each deploy container, ("follow", app) for each joined one, in order.
+        self.events: list[tuple[str, str]] = []
+
+    def finish(self, app: str, code: int) -> None:
+        """The running deploy container of the app exits with this code."""
+        for item in self.containers:
+            if item["Names"] == [f"deploy-{app}"]:
+                item.update(State="exited", ExitCode=code)
 
     def record(self, app: str, labels: dict[str, str], code: int, *, running: bool = False) -> None:
         name = f"deploy-{app}"
+        self.events.append(("run", app))
         self.containers = [item for item in self.containers if item["Names"] != [name]]
         self.containers.append(
             {
@@ -1128,16 +1143,45 @@ async def test_a_deploy_reports_its_rev_after_yard_dies_mid_deploy(tmp_path: Pat
     await apps._check(fresh, fresh.store.app("stario-site"), cause="check", actor="check")
 
 
-async def test_a_yard_deploy_waits_for_a_running_self_deploy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """`podman run --replace` would kill the running apply. The deploy skips before the clone moves."""
+async def test_a_running_deploy_container_is_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Production, 2026-11-02 21:25 to 21:28: each push replaced the running deploy-yard.
+
+    A push while deploy-yard runs follows it and never replaces it. When it ends,
+    the check runs again and deploys the newer tip once.
+    """
     yard, recorder = _deploy_github(tmp_path, monkeypatch, name="yard")
-    assert recorder.host is not None
-    recorder.host.record("yard", {"sha": "old"}, 0, running=True)
+    host = recorder.host
+    assert host is not None
+    old = "a" * 40
+    new = git.head(yard.config.clone("yard"))
+    host.record("yard", {"sha": old, "runs": "Containerfile", "kind": "containerfile"}, 0, running=True)
+    host.events.clear()
+    monkeypatch.setattr(git, "remote_tip", lambda *a, **kw: asyncio.sleep(0, new))
+    await apps._check(yard, yard.store.app("yard"), cause="push", actor="webhook:github")
+    assert host.events == [("follow", "yard"), ("run", "yard")]
+    assert [call["labels"]["sha"] for call in recorder.calls] == [new]
+    assert recorder.calls[0]["labels"]["before.revision"] == old
+
+    # The new deploy runs for the tip: a second push follows nothing and runs nothing.
+    host.events.clear()
+    await apps._check(yard, yard.store.app("yard"), cause="push", actor="webhook:github")
+    assert host.events == []
+    assert len(recorder.calls) == 1
+
+
+async def test_a_deploy_request_joins_the_running_deploy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """After a restart the job is gone, but the container runs: the request follows its log to its end."""
+    yard, recorder = _deploy_yard(tmp_path, monkeypatch)
+    host = recorder.host
+    assert host is not None
+    host.record("heldso", {"sha": "b" * 40, "image": "localhost/heldso:bbbbbbbbbbbb"}, 0, running=True)
 
     async def no_sync(*args, **kw):
         raise AssertionError("synced the clone under a running build")
 
     monkeypatch.setattr(git, "sync", no_sync)
-    outcome = await apps.deploy(yard, "yard")
-    assert outcome.status == "skipped" and "still running" in outcome.error
+    outcome = await apps.deploy(yard, "heldso")
+    assert outcome.status == "ok" and outcome.joined
+    assert outcome.image == "localhost/heldso:bbbbbbbbbbbb"
+    assert "== the running deploy" in yard.deploys["heldso"].lines
     assert not recorder.calls

@@ -8,7 +8,10 @@
 - The check loop reads the last tried (revision, template) pair from the deploy container, so a failed pair is not tried again after a restart either.
 - `apps/<name>/deployed` is no longer read or written. An upgraded host can delete it.
 - The `deploy.start` and `deploy.end` journal events are gone. `GET /api/v1/events` makes the `deploy.start` and `deploy.end` rows from Podman's `create` and `died` events of `deploy-<name>`, with the same shape (`source` is `yard`). The status comes from the exit code: 0 is `ok`, 3 is `reverted`, any other code is `failed`. `yard events --event deploy.` works as before. Rows from older Yard versions still come from the journal.
-- A yard deploy skips while the last yard self-deploy still runs. Before, the next push ran `podman run --replace --name deploy-yard`, which killed the running apply in the middle of its build.
+- A running `deploy-<name>` container is the deploy lock, also after a Yard restart. Before, only the in-memory job stopped a second deploy, and each deploy ran `podman run --replace`. On 2026-11-02 from 21:25 to 21:28, each push replaced the running `deploy-yard`, so three yard self-deploys stopped in the middle and had no `deploy.end`.
+- Yard removes the last deploy container with a plain `podman rm` (no `-f`), then runs the new one without `--replace`. Podman refuses to remove a running container, so a running deploy is never replaced.
+- A check or a webhook that finds a running deploy for another revision follows it. When it ends, the check runs again, so the newest revision still deploys once. The new Yard process after a self-deploy picks up a newer tip the same way.
+- `POST /api/v1/apps/{name}/deploy` joins a running deploy, also after a restart: the job streams the deploy container's log from its first line, and its status comes from the exit code. `yard app deploy` follows it as before.
 - A URL app deploy prunes the old compose copies when it starts. It keeps the running copy and the new one.
 - The deploy job reads the exposed port when the client asks for the job after an ok deploy. The `SHA` env of the Yard container is no longer read.
 

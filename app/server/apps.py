@@ -126,6 +126,8 @@ class Outcome:
     image: str = ""
     error: str = ""
     previous: str = ""
+    # True when this deploy followed one that already ran: the revision it reports is that deploy's.
+    joined: bool = False
 
 
 def start_deploy(yard: Yard, name: str, *, cause: str = "manual", actor: str = "") -> Job:
@@ -185,10 +187,8 @@ async def _deploy_body(yard: Yard, job: Job) -> Outcome:
             return Outcome("skipped")
         listed = await status.list_containers(yard)
         record = listed.get(deploy_container(app.name))
-        if app.name == "yard" and record is not None and record.running:
-            # `podman run --replace` would kill that apply mid-build. The next Yard process checks the tip again.
-            job.push("== a yard deploy is still running. This deploy did not run.")
-            return Outcome("skipped", error="a yard deploy is still running")
+        if record is not None and record.running:
+            return await _join(yard, job)
         ready = Ready(revision="", before=status.running_plan(app, listed) or Deployed())
         try:
             if app.repo:
@@ -203,6 +203,16 @@ async def _deploy_body(yard: Yard, job: Job) -> Outcome:
             await compose.record_failure(yard.config, app.name, _labels(job, ready, outcome), job.lines)
             return outcome
         return await _apply(yard, app, job, ready)
+
+
+async def _join(yard: Yard, job: Job) -> Outcome:
+    """A running deploy container is the deploy lock, also after a Yard restart. Follow it to its end."""
+    job.push(f"== {deploy_container(job.app)} is running. This deploy follows it.")
+    await compose.follow(yard.config, job.app, job.push)
+    record = await status.last_deploy(yard, job.app)
+    if record is None or record["status"] == "running":
+        return Outcome("failed", error=f"lost {deploy_container(job.app)} while it ran", joined=True)
+    return Outcome(record["status"], record["image"], record["error"], record["previous"], joined=True)
 
 
 @dataclass(slots=True)
@@ -540,7 +550,14 @@ async def _check(
         tip=current[0],
         template=current[1],
     )
-    await deploy(yard, app.name, cause=cause, actor=actor)
+    outcome = await deploy(yard, app.name, cause=cause, actor=actor)
+    if outcome.joined:
+        # Another deploy held the lock. It has ended: check again, so the newest revision still deploys.
+        try:
+            app = yard.store.app(app.name)
+        except YardError:
+            return
+        await _check(yard, app, token=token, fetched={}, cause=cause, actor=actor)
 
 
 def _template_at(clone: Path, app: App) -> str:

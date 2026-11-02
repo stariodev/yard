@@ -202,12 +202,14 @@ def test_apply_runs_one_podman_container(tmp_path: Path, monkeypatch: pytest.Mon
 
     code, text = asyncio.run(compose.apply(config, "heldso", "up", found))
     assert code == 0
-    argv, env = calls[0]
-    assert argv[:13] == [
+    # A plain rm first: Podman refuses to remove a running deploy container, so a running deploy is never replaced.
+    assert calls[0][0] == ["podman", "--remote", "rm", "deploy-heldso"]
+    argv, env = calls[1]
+    assert "--replace" not in argv
+    assert argv[:12] == [
         "podman",
         "--remote",
         "run",
-        "--replace",
         "--name",
         "deploy-heldso",
         "--network",
@@ -294,7 +296,7 @@ def test_install_sh_and_apply_pass_the_same_env_names(tmp_path: Path, monkeypatc
     checkout = _checkout(tmp_path, {"ops/compose.yml": FULL})
     found = project(config, _app("yard"), "compose", "ops/compose.yml", "abc", "localhost/yard:abc", checkout)
     asyncio.run(compose.apply(config, "yard", "up", found))
-    argv, _env = calls[0]
+    argv, _env = calls[-1]
     python_names = {value.split("=", 1)[0] for flag, value in zip(argv, argv[1:], strict=False) if flag == "-e"}
     assert python_names == shell_names
 
@@ -357,9 +359,10 @@ def test_record_failure_runs_a_deploy_container_that_prints_and_exits_1(
 
     monkeypatch.setattr(compose, "_run", fake_run)
     asyncio.run(compose.record_failure(config, "heldso", {"sha": "abc", "error": "no"}, ["== sync", "!! no"]))
-    argv = calls[0]
+    assert calls[0][-2:] == ["rm", "deploy-heldso"]
+    argv = calls[1]
     assert argv[argv.index("--name") + 1] == "deploy-heldso"
-    assert "--replace" in argv
+    assert "--replace" not in argv
     assert "yard.error=no" in argv and "yard.sha=abc" in argv
     assert "YARD_LOG=== sync\n!! no" in argv
     assert argv[-3:] == ["localhost/yard-apply", "-c", 'printf "%s\\n" "$YARD_LOG"; exit 1']
