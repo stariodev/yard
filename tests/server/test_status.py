@@ -256,6 +256,6 @@ def test_deploy_record_reads_the_labels_and_the_exit_code(state, code, status_, 
     raw = json.dumps([{"Names": ["deploy-heldso"], "State": state, "ExitCode": code, "Labels": labels}])
     record = status.deploy_record(parse_ps(raw), "heldso")
     assert record is not None
-    assert record["sha"] == "abc123" and record["image"] == "localhost/heldso:abc123"
-    assert record["status"] == status_
-    assert record["error"] == error
+    assert record.sha == "abc123" and record.image == "localhost/heldso:abc123"
+    assert record.status == status_
+    assert record.error == error

@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from app.server import journal, podman, sites
 from app.server.podman import Container, Sample
@@ -13,6 +13,32 @@ from app.shared import YardError, app_container, deploy_container, image_sha, pa
 
 if TYPE_CHECKING:
     from app.server.yard import Yard
+
+
+@dataclass(slots=True)
+class Record:
+    """The last deploy, read from the deploy container: its labels and its exit code."""
+
+    app: str
+    sha: str
+    image: str
+    status: str
+    cause: str
+    actor: str
+    previous: str
+    error: str
+    started: str
+    ended: str
+
+
+def deploy_status(code: int) -> str:
+    """The end of a deploy from the apply exit code: 0 ok, 3 reverted, any other code failed."""
+    return "ok" if code == 0 else "reverted" if code == 3 else "failed"
+
+
+def deploy_error(code: int, previous: str) -> str:
+    """The error text of an apply that did not end ok."""
+    return f"unhealthy; reverted to {previous}" if code == 3 else f"apply exited {code}" if code else ""
 
 
 @dataclass(slots=True)
@@ -38,7 +64,7 @@ class Row:
     cpu: str = ""
     mem: str = ""
     data: int = 0
-    deploy: dict[str, Any] | None = None
+    deploy: Record | None = None
     template_moved: bool = False
 
 
@@ -70,7 +96,7 @@ class Page:
     dir: str
     rows: list[Row]
     hosts: list[str]
-    deploy: dict[str, Any] | None
+    deploy: Record | None
     log: str
     deployed: Deployed | None = None
     template_moved: bool = False
@@ -213,37 +239,25 @@ def _image_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
     return Deployed(revision=revision, template=tag[len(revision) + 1 :])
 
 
-def deploy_record(listed: dict[str, Container], name: str) -> dict[str, Any] | None:
+def deploy_record(listed: dict[str, Container], name: str) -> Record | None:
     """The deploy container is the record of the last deploy: its labels and its exit code."""
     item = listed.get(deploy_container(name))
     if item is None:
         return None
-    if item.running:
-        state = "running"
-    elif item.exit_code == 0:
-        state = "ok"
-    elif item.exit_code == 3:
-        state = "reverted"
-    else:
-        state = "failed"
     labels = item.labels
-    error = labels.get("error", "")
-    if not error and state == "failed":
-        error = f"apply exited {item.exit_code}"
-    elif not error and state == "reverted":
-        error = f"unhealthy; reverted to {labels.get('previous', '')}"
-    return {
-        "app": name,
-        "sha": labels.get("sha", ""),
-        "image": labels.get("image", ""),
-        "status": state,
-        "cause": labels.get("cause", ""),
-        "actor": labels.get("actor", ""),
-        "previous": labels.get("previous", ""),
-        "error": error,
-        "started": stamp(item.started) if item.started else "",
-        "ended": stamp(item.exited) if item.exited and not item.running else "",
-    }
+    previous = labels.get("previous", "")
+    return Record(
+        app=name,
+        sha=labels.get("sha", ""),
+        image=labels.get("image", ""),
+        status="running" if item.running else deploy_status(item.exit_code),
+        cause=labels.get("cause", ""),
+        actor=labels.get("actor", ""),
+        previous=previous,
+        error=labels.get("error", "") or ("" if item.running else deploy_error(item.exit_code, previous)),
+        started=stamp(item.started) if item.started else "",
+        ended=stamp(item.exited) if item.exited and not item.running else "",
+    )
 
 
 def _site_target(app: App, items: list[Container]) -> str:
@@ -259,7 +273,7 @@ def _app_rows(
     samples: dict[str, Sample],
     tip: Tip | None,
     deployed: Deployed | None,
-    note: dict[str, Any] | None,
+    note: Record | None,
     hosts: list[str],
     crashes: dict[str, tuple[bool, str]],
     running_only: bool,
@@ -338,7 +352,7 @@ def _row(
     sample: Sample | None,
     tip: Tip | None,
     deployed: Deployed | None,
-    note: dict[str, Any] | None,
+    note: Record | None,
     hosts: list[str],
     crashes: dict[str, tuple[bool, str]],
 ) -> Row:
@@ -415,7 +429,7 @@ async def _container_tail(yard: Yard, name: str) -> str:
             return ""
 
 
-async def last_deploy(yard: Yard, name: str) -> dict[str, Any] | None:
+async def last_deploy(yard: Yard, name: str) -> Record | None:
     """The record of the last deploy, read from its container; None before the first deploy."""
     try:
         listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
