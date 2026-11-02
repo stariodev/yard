@@ -68,7 +68,6 @@ class Yard:
                 GitHub(config.data("yard") / "github"),
             )
         }
-        self.skip_deploy = config.skip_deploy
         self.tips: dict[str, Tip] = {}
         self.deploys: dict[str, Job] = {}
         self.locks: dict[str, asyncio.Lock] = {}

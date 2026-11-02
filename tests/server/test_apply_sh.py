@@ -110,32 +110,16 @@ def test_up_fails_without_a_previous_image(tmp_path: Path):
     assert "== revert" not in out
 
 
-def test_wait_seconds_overrides_the_wait_timeout(tmp_path: Path):
-    code, _out, log, _err = _run(tmp_path, "up", WAIT_SECONDS="300")
-    assert code == 0
-    assert "dc:up -d --wait --wait-timeout 300 --remove-orphans --no-build" in log
-
-
 def test_unknown_command_exits(tmp_path: Path):
     code, _out, _log, err = _run(tmp_path, "job")
     assert code == 2
     assert "usage:" in err
 
 
-def test_down_and_purge(tmp_path: Path):
-    code, _, log, _err = _run(tmp_path, "down")
-    assert code == 0
-    assert "dc:down\n" in log
+def test_purge(tmp_path: Path):
     code, _, log, _err = _run(tmp_path, "purge")
     assert code == 0
     assert "dc:down -v" in log
-
-
-def test_start_restarts_the_current_image(tmp_path: Path):
-    code, out, log, _err = _run(tmp_path, "start")
-    assert code == 0
-    assert "== start localhost/heldso:abc" in out
-    assert "dc:up -d --wait --wait-timeout 120 --no-build" in log
 
 
 def test_up_rejects_an_app_off_the_yard_network(tmp_path: Path):
@@ -147,7 +131,7 @@ def test_up_rejects_an_app_off_the_yard_network(tmp_path: Path):
 def test_warnings_come_from_the_compose_file(tmp_path: Path):
     compose = tmp_path / "compose.yml"
     compose.write_text("services:\n  app:\n    networks:\n      - yard\n")
-    code, out, _, _err = _run(tmp_path, "build", COMPOSE_FILE=str(compose))
+    code, out, _, _err = _run(tmp_path, "up", COMPOSE_FILE=str(compose))
     assert code == 0
     assert "${APP_ENV}" in out
     assert "${DATA_DIR}" in out

@@ -100,10 +100,6 @@ class Forge:
                 return installation
         return None
 
-    def owns(self, repo: str) -> bool:
-        """True when an installation's account owns the repo's owner."""
-        return self.installation_for(repo) is not None
-
     def selection(self, installation: dict) -> str:
         """all or selected. Subclasses read their own field."""
         return ""
@@ -370,25 +366,6 @@ class Origin(Forge):
     async def get_app_for(self, app_id: str) -> dict:
         body = await self._call("GET", "/app", self._jwt(app_id))
         return body if isinstance(body, dict) else {}
-
-    async def repos(self) -> list[str]:
-        """The repo full names the installation can see. Follows the page token."""
-        token = await self.token()
-        found: list[str] = []
-        page = ""
-        while True:
-            path = "/installation/repos?pageSize=100"
-            if page:
-                path += f"&pageToken={page}"
-            body = await self._call("GET", path, token)
-            items = (body.get("repositories") or body.get("repos") or []) if isinstance(body, dict) else []
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict) and item.get("fullName"):
-                        found.append(str(item["fullName"]))
-            page = str(body.get("nextPageToken") or body.get("next_page_token") or "") if isinstance(body, dict) else ""
-            if not page:
-                return found
 
     async def _make_repo(self, installation: dict, owner: str, name: str) -> str:
         body = await self._call(

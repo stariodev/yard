@@ -3,6 +3,7 @@
 ## 0.11.0
 
 - Breaking: the CLI prints JSON only with `--json`. Before, it printed JSON whenever stdout was not a terminal, so `yard env cat > .env` wrote JSON and `yard logs | grep` searched a JSON blob. `--text` is gone.
+- The apply container runs only `up` and `purge`. The unused `build`, `start`, and `down` commands and the unread `WAIT_SECONDS` setting are gone; the wait stays 120 seconds.
 - Caddy reads Caddyfiles. Each app has one site file on Yard, `apps/yard/caddy/config/sites/<name>.caddy`. `yard caddy cat` prints it, and `yard caddy edit` opens it in `$EDITOR` or reads it from stdin. Yard loads Caddy after each save. Caddy checks the whole config first; a refused file keeps the old config, and the error names the file and the line. An empty file removes the site. A refused edit in the editor opens the editor again on the same text.
 - `yard app new --caddy HOST` writes the default site after the first deploy: every host, comma-separated, to `<name>-app-1` on the port the container exposes, else 8000 for an app with a repo. `--caddy` repeats. An image or URL app without one exposed port gets the template printed and no file. `--caddy` with `--no-deploy` is refused.
 - New routes: `GET /api/v1/apps/{name}/caddy` answers the site file as text (empty when there is none), and `PUT` takes the whole file as the body and answers `{"hosts"}`. A refused file is a 400 `bad_caddyfile` with Caddy's error.

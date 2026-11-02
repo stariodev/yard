@@ -1,7 +1,6 @@
 """Podman CLI and the JSON it prints. The socket stays on the host."""
 
 import asyncio
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -82,17 +81,10 @@ class Podman:
         self,
         *args: str,
         timeout: float | None = 20,
-        env: dict[str, str] | None = None,
-        stdin: bytes | None = None,
     ) -> str:
-        merged = os.environ.copy()
-        if env:
-            merged.update(env)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self._args(args),
-                env=merged if env else None,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -105,9 +97,9 @@ class Podman:
             ) from exc
         try:
             if timeout is None:
-                out, err = await proc.communicate(stdin)
+                out, err = await proc.communicate()
             else:
-                out, err = await asyncio.wait_for(proc.communicate(stdin), timeout)
+                out, err = await asyncio.wait_for(proc.communicate(), timeout)
         except TimeoutError as exc:
             proc.kill()
             raise YardError(

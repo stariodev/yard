@@ -23,10 +23,6 @@ check() {
     grep -q '\${DATA_DIR}' "$file" || echo "warning: compose: no service mounts \${DATA_DIR}; the project has no /data"
   done
   IFS=$oldifs
-  case "$1" in
-    up|start) ;;
-    *) return 0 ;;
-  esac
   cfg=$(dc config) || exit 1
   printf '%s\n' "$cfg" | awk '
     /^  app:/ { inapp = 1; next }
@@ -89,7 +85,7 @@ up() {
     build
   fi
   echo "== start $IMAGE"
-  dc up -d --wait --wait-timeout "${WAIT_SECONDS:-120}" --remove-orphans --no-build || {
+  dc up -d --wait --wait-timeout 120 --remove-orphans --no-build || {
     echo "== unhealthy: up failed"
     revert
   }
@@ -97,20 +93,13 @@ up() {
 }
 
 case "${1:-}" in
-  build|up|start) check "$1" ;;
-esac
-
-case "${1:-}" in
-  build) build ;;
-  up) up ;;
-  start)
-    echo "== start $IMAGE"
-    dc up -d --wait --wait-timeout "${WAIT_SECONDS:-120}" --no-build
+  up)
+    check
+    up
     ;;
-  down) dc down ;;
   purge) dc down -v ;;
   *)
-    echo "usage: apply {build|up|start|down|purge}" >&2
+    echo "usage: apply {up|purge}" >&2
     exit 2
     ;;
 esac

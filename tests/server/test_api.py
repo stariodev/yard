@@ -743,9 +743,9 @@ async def test_installation_hook_keeps_every_account(yard, monkeypatch):
         {"account": "Bobowski", "id": "101", "selection": "all", "type": ""},
     ]
     assert "installation_id" not in state
-    # The Bobowski app still counts as owned.
-    assert github.owns("https://github.com/Bobowski/yard")
-    assert github.owns("https://github.com/stariodev/yard")
+    # Both accounts keep an installation.
+    assert github.installation_for("https://github.com/Bobowski/yard")
+    assert github.installation_for("https://github.com/stariodev/yard")
 
 
 def _yard_forges(root):
