@@ -58,9 +58,8 @@ class _Apply:
 
 
 def _connect(monkeypatch: pytest.MonkeyPatch, token: str = "oit_x") -> None:
-    """Every forge connected and owning every repo, with a canned token."""
+    """Every forge connected, with a canned token."""
     monkeypatch.setattr(Forge, "connected", lambda self: True)
-    monkeypatch.setattr(Forge, "owns", lambda self, repo: True)
 
     async def fake_token(self, repo: str = ""):
         return token
@@ -461,7 +460,7 @@ class _Podman(Podman):
         self.ps = ps
         self.has_image = has_image
 
-    async def run(self, *args: str, timeout=None, env=None, stdin: bytes | None = None) -> str:
+    async def run(self, *args: str, timeout=None) -> str:
         if args[:1] == ("ps",):
             return self.ps
         if args[:2] == ("image", "exists"):
@@ -546,7 +545,7 @@ class _Fake(Podman):
         super().__init__("podman", False)
         self.removed: list[str] = []
 
-    async def run(self, *args: str, timeout=None, env=None, stdin: bytes | None = None) -> str:
+    async def run(self, *args: str, timeout=None) -> str:
         if args[:1] == ("ps",):
             return (
                 '[{"Names":["heldso-app-1"],"State":"running","Image":"localhost/app:ne11",'

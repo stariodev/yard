@@ -201,7 +201,7 @@ async def _deploy_body(yard: Yard, job: Job) -> Outcome:
         except YardError as exc:
             job.push(f"!! {exc}")
             return Outcome("failed", error=str(exc))
-        if yard.skip_deploy:
+        if yard.config.skip_deploy:
             job.push("YARD_SKIP_DEPLOY is set. Deploy did not run.")
             return Outcome("skipped")
         if app.repo:
@@ -561,7 +561,6 @@ async def _check(
     yard: Yard,
     app: App,
     *,
-    forge: Forge | None = None,
     token: str = "",
     fetched: dict[str, bytes] | None = None,
     cause: str,
@@ -645,7 +644,7 @@ async def _check_forge(yard: Yard, forge: Forge) -> None:
         except YardError as exc:
             log.warning("%s token: %s", forge.name, exc)
             continue
-        await _check(yard, app, forge=forge, token=token, cause="check", actor="check")
+        await _check(yard, app, token=token, cause="check", actor="check")
     forge.last_check = now()
 
 
@@ -711,7 +710,7 @@ async def _check_repo(yard: Yard, repo: str) -> None:
         return
     for app in yard.store.list_apps():
         if app.repo.lower() == repo.lower() and app.trigger == "push":
-            await _check(yard, app, forge=forge, token=token, cause="push", actor=f"webhook:{forge.name}")
+            await _check(yard, app, token=token, cause="push", actor=f"webhook:{forge.name}")
 
 
 async def loop(yard: Yard) -> None:

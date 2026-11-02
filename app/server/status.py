@@ -101,7 +101,7 @@ async def report(yard: Yard, running_only: bool = False) -> Report:
 
     rows: list[Row] = []
     for app in apps:
-        items = [item for item in grouped.pop(app.name, []) if _shows(item, app)]
+        items = [item for item in grouped.pop(app.name, []) if item.role == "app"]
         tip = yard.tips.get(app.name)
         deployed = read_deployed(config, app.name)
         note = deploy_record(listed, app.name)
@@ -169,11 +169,6 @@ def _site_target(app: App, items: list[Container]) -> str:
     return want if any(item.name == want for item in items) else ""
 
 
-def _shows(item: Container, app: App) -> bool:
-    """Compose services for this app. The apply container is not a row."""
-    return item.role == "app"
-
-
 def _app_rows(
     config: Config,
     app: App,
@@ -219,7 +214,7 @@ async def app_report(yard: Yard, name: str) -> Page:
         samples = {}
     tip = yard.tips.get(app.name)
     deployed = read_deployed(config, name)
-    items = [item for item in listed.values() if item.app == name and _shows(item, app)]
+    items = [item for item in listed.values() if item.app == name and item.role == "app"]
     hosts = await sites.list_hosts(yard, app.name)
     note = deploy_record(listed, name)
     crashes = await _crashes(yard, listed)

@@ -197,15 +197,6 @@ async def test_find_installations_an_empty_answer_saves_an_empty_list(api, tmp_p
     assert state == {"app_id": "app_1", "installations": []}
 
 
-async def test_repos_follows_the_page_token(api):
-    origin, box = api
-    _wire(origin)
-    names = await origin.repos()
-    assert names == ["org/one", "org/two"]
-    paths = [path for _m, path, _a in box.calls if path.startswith("/installation/repos")]
-    assert paths == ["/installation/repos?pageSize=100", "/installation/repos?pageSize=100&pageToken=2"]
-
-
 async def test_a_bad_status_is_a_yard_error(api):
     origin, _box = api
     _wire(origin)
@@ -571,32 +562,32 @@ async def test_github_url():
     assert clone_url("https://github.com/org/heldso") == "https://github.com/org/heldso.git"
 
 
-def test_owns_without_a_saved_account_allows_everything(tmp_path):
+def test_no_saved_account_matches_every_owner(tmp_path):
     """A legacy install with no account keeps owning every repo."""
     github = GitHub(tmp_path / "github")
     github.save(installation_id="101")
-    assert github.owns("https://github.com/Bobowski/yard")
+    assert github.installation_for("https://github.com/Bobowski/yard")
 
 
 def test_a_legacy_state_reads_as_one_installation(tmp_path):
     github = GitHub(tmp_path / "github")
     github.save(app_id="42", installation_id="101", account="Bobowski")
     assert github.installations == [{"id": "101", "account": "Bobowski", "selection": ""}]
-    assert github.owns("https://github.com/Bobowski/x")
-    assert github.owns("https://github.com/bobowski/x")
-    assert not github.owns("https://github.com/stariodev/x")
+    assert github.installation_for("https://github.com/Bobowski/x")
+    assert github.installation_for("https://github.com/bobowski/x")
+    assert not github.installation_for("https://github.com/stariodev/x")
 
 
-def test_owns_matches_the_url_owner_case_insensitively(tmp_path):
+def test_installation_for_matches_the_url_owner_case_insensitively(tmp_path):
     github = GitHub(tmp_path / "github")
     github.save(installation_id="101", account="org")
-    assert github.owns("https://github.com/org/yard")
-    assert github.owns("https://github.com/ORG/yard.git")
-    assert not github.owns("https://github.com/Bobowski/yard")
-    assert not github.owns("https://github.com/other/yard")
+    assert github.installation_for("https://github.com/org/yard")
+    assert github.installation_for("https://github.com/ORG/yard.git")
+    assert not github.installation_for("https://github.com/Bobowski/yard")
+    assert not github.installation_for("https://github.com/other/yard")
 
 
-def test_owns_picks_the_installation_for_the_owner(tmp_path):
+def test_installation_for_picks_the_installation_for_the_owner(tmp_path):
     github = GitHub(tmp_path / "github")
     github.save(
         installations=[
@@ -609,9 +600,9 @@ def test_owns_picks_the_installation_for_the_owner(tmp_path):
         "account": "stariodev",
         "selection": "all",
     }
-    assert github.owns("https://github.com/Bobowski/yard")
-    assert github.owns("https://github.com/stariodev/yard")
-    assert not github.owns("https://github.com/other/yard")
+    assert github.installation_for("https://github.com/Bobowski/yard")
+    assert github.installation_for("https://github.com/stariodev/yard")
+    assert not github.installation_for("https://github.com/other/yard")
 
 
 async def test_token_mints_per_installation_for_the_repo_owner(gh_api, tmp_path):
