@@ -56,16 +56,11 @@ def _app_container(app: str, name: str, **extra):
     }
 
 
-def _bind(yard: Yard, host: str, dial: str) -> None:
-    yard.caddy = FakeCaddy(
-        [
-            {
-                "@id": f"yard-{host}",
-                "match": [{"host": [host]}],
-                "handle": [{"upstreams": [{"dial": dial}]}],
-            }
-        ]
-    )
+def _site(yard: Yard, name: str, *hosts: str) -> None:
+    yard.caddy = FakeCaddy()
+    path = yard.config.site(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{', '.join(hosts)} {{\n\treverse_proxy {name}-app-1:8000\n}}\n")
 
 
 def test_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -88,7 +83,7 @@ def test_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
     yard.store.create_app("nightly", "https://origin.cursor.com/org/app", "main", "manual")
     yard.store.create_app("gone", "https://origin.cursor.com/org/app", "main")
-    _bind(yard, "heldso.example.com", "heldso:8000")
+    _site(yard, "heldso", "heldso.example.com")
     data = tmp_path / "apps" / "heldso" / "data"
     data.mkdir(parents=True)
     (data / "f").write_bytes(b"x" * 10)
@@ -115,8 +110,8 @@ def test_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert rows["heldso-app-1"]["cpu"] == "1.5%"
     assert rows["heldso-app-1"]["sha"] == "abc"
     assert rows["heldso-app-1"]["tip"] == "tip9"
-    assert rows["heldso-app-1"]["binds"] == [{"host": "heldso.example.com", "dial": "heldso:8000"}]
-    assert rows["heldso-worker"]["binds"] == []
+    assert rows["heldso-app-1"]["hosts"] == ["heldso.example.com"]
+    assert rows["heldso-worker"]["hosts"] == []
     assert rows["heldso-app-1"]["data"] == 10
     assert rows["heldso-app-1"]["deploy"]["status"] == "ok"
     assert rows["heldso-app-1"]["started"] == "2024-03-09T16:00:00Z"
@@ -161,7 +156,7 @@ def test_app_report_is_the_app_page(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     log = "2026-10-05T12:00:00Z one\n2026-10-05T12:00:01Z two\n"
     yard = _yard(tmp_path, [_app_container("heldso", "heldso-app-1")], sock=True, logs=log)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    _bind(yard, "heldso.example.com", "heldso:8000")
+    _site(yard, "heldso", "heldso.example.com")
 
     from app.server.yard import Tip
 
@@ -171,13 +166,13 @@ def test_app_report_is_the_app_page(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert found["app"]["name"] == "heldso"
     assert "env" not in found["app"]
     assert found["env_file"].endswith("apps/heldso/env")
-    assert found["binds"] == [{"host": "heldso.example.com", "dial": "heldso:8000"}]
+    assert found["hosts"] == ["heldso.example.com"]
     assert [row["container"] for row in found["rows"]] == ["heldso-app-1"]
     assert found["deploys"] == []
     assert "two" in found["log"]
 
 
-def test_two_public_names_stay_on_the_app_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_two_hosts_stay_on_the_app_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(
         tmp_path,
         [
@@ -186,28 +181,12 @@ def test_two_public_names_stay_on_the_app_row(tmp_path: Path, monkeypatch: pytes
         ],
     )
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    yard.caddy = FakeCaddy(
-        [
-            {
-                "@id": "yard-heldso.example.com",
-                "match": [{"host": ["heldso.example.com"]}],
-                "handle": [{"upstreams": [{"dial": "heldso:8000"}]}],
-            },
-            {
-                "@id": "yard-www.heldso.example.com",
-                "match": [{"host": ["www.heldso.example.com"]}],
-                "handle": [{"upstreams": [{"dial": "heldso:8000"}]}],
-            },
-        ]
-    )
+    _site(yard, "heldso", "heldso.example.com", "www.heldso.example.com")
     yard.tips.clear()
     report = asdict(asyncio.run(status.report(yard)))
     rows = {row["container"]: row for row in report["rows"]}
-    assert rows["heldso-app-1"]["binds"] == [
-        {"host": "heldso.example.com", "dial": "heldso:8000"},
-        {"host": "www.heldso.example.com", "dial": "heldso:8000"},
-    ]
-    assert rows["heldso-worker"]["binds"] == []
+    assert rows["heldso-app-1"]["hosts"] == ["heldso.example.com", "www.heldso.example.com"]
+    assert rows["heldso-worker"]["hosts"] == []
 
 
 def test_url_row_shows_the_deployed_revision(tmp_path):

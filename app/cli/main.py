@@ -29,7 +29,6 @@ from app.cli.render import (
     ansi,
     format_app_status,
     format_apps,
-    format_binds,
     format_doctor,
     format_events,
     format_forges,
@@ -46,7 +45,6 @@ from app.shared import (
     check_app_name,
     check_domain,
     check_repo,
-    check_window,
     explain,
     format_bytes,
     format_env,
@@ -178,10 +176,10 @@ def _stream(client: Client, method: str, path: str, body: object) -> None:
 
 
 def _request(client: Client, method: str, path: str, body: object) -> urllib.request.Request:
-    data = None if body is None else json.dumps(body).encode()
+    data = body if isinstance(body, bytes) or body is None else json.dumps(body).encode()
     headers = {"authorization": f"Bearer {client.token}"}
     if data is not None:
-        headers["content-type"] = "application/json"
+        headers["content-type"] = "text/caddyfile" if isinstance(body, bytes) else "application/json"
     return urllib.request.Request(client.url + path, data=data, headers=headers, method=method)
 
 
@@ -447,12 +445,13 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
             name = name or _default_name(repo, ref)
             repo = check_repo(repo)
         check_app_name(name)
-        host = (args.public or "").strip()
-        window = check_window(args.window or "") if host else ""
-        if host:
+        hosts = [host.strip() for host in args.caddy]
+        for host in hosts:
             check_domain(host)
     except YardError as exc:
         _fail(exc)
+    if hosts and args.no_deploy:
+        _die("--caddy needs the first deploy: Yard reads the port from the running container.")
 
     env = _new_app_env(args)
     session = _load(args)
@@ -478,7 +477,6 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
             print(format_record(json.dumps(app)), end="")
         else:
             print(raw)
-        _maybe_bind(session, host, name, args.port or (0 if repo_less else 8000), window)
         print(f"Not deployed yet. Deploy it: yard app deploy --app {name}")
         return
     if not _json:
@@ -489,19 +487,15 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
         print(f"Deploying {name} now…")
     code, text = _api_try(session, "POST", f"/api/v1/apps/{quote(name)}/deploy", {})
     if code >= 300:
-        if host:
-            # A repo app still binds so Caddy is ready after the fix.
-            _maybe_bind(session, host, name, args.port or (0 if repo_less else 8000), window)
         _die(f"{name} was created, but the first deploy failed.\n" + (text if _json else explain(text)))
-    note = _follow_deploy(session, name)
-    if _json:
-        return
-    if note:
+    note = _follow_deploy(session, name) or {}
+    if note and not _json:
         _print_deploy_note(note, name)
-    port = args.port or int((note or {}).get("port") or 0) or (0 if repo_less else 8000)
-    _maybe_bind(session, host, name, port, window)
-    if (note or {}).get("status") == "failed":
+    if note.get("status") == "failed":
+        if hosts:
+            print(f"Caddy has no site for {name} yet. After a good deploy, run: yard caddy edit --app {name}")
         _die(f"{name} was created, but the first deploy failed.")
+    _write_default_site(session, name, hosts, int(note.get("port") or 0))
 
 
 def _new_app_env(args: argparse.Namespace) -> dict[str, str]:
@@ -523,19 +517,29 @@ def _new_app_env(args: argparse.Namespace) -> dict[str, str]:
     return env
 
 
-def _maybe_bind(session, host: str, name: str, port: int, window: str) -> None:
-    """Bind the public host, or print the command when the port is not known."""
-    if not host:
+def default_site(hosts: list[str], container: str, port: int | str) -> str:
+    """The site that `app new --caddy` writes: every host to the app container."""
+    return (
+        f"{', '.join(hosts)} {{\n"
+        f"\treverse_proxy {container}:{port} {{\n"
+        "\t\tlb_try_duration 10s\n"
+        "\t\tlb_try_interval 250ms\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
+def _write_default_site(session: Client, name: str, hosts: list[str], port: int) -> None:
+    """The default site, with the container and the port that the deploy found. No port, no file."""
+    if not hosts:
         return
-    if port:
-        _api(
-            session,
-            "PUT",
-            f"/api/v1/binds/{quote(host, safe='')}",
-            {"dial": f"{name}-app-1:{port}", "try": window},
-        )
-    else:
-        print(f"Bind it: yard bind set {host} {name}-app-1:PORT")
+    container = f"{name}-app-1"
+    if not port:
+        print(f"Caddy has no site for {name}: {container} does not expose exactly one port.", file=sys.stderr)
+        print(f"Write the site with the port the app listens on: yard caddy edit --app {name}", file=sys.stderr)
+        print(default_site(hosts, container, "PORT"), end="", file=sys.stderr)
+        raise SystemExit(1)
+    _print_site_saved(name, _api(session, "PUT", _site_path(name), default_site(hosts, container, port).encode()))
 
 
 def _cmd_app_set(args: argparse.Namespace) -> None:
@@ -727,12 +731,11 @@ def _cmd_app_rm(args: argparse.Namespace) -> None:
     if not args.yes:
         if not sys.stdin.isatty():
             _die("yard app rm deletes the app's data and needs a confirmation.\nRun it in a terminal, or pass --yes.")
-        _rm_preview(session, name, args.with_binds)
+        _rm_preview(session, name)
         answer = _ask("Type the app name to confirm: ", stopped="Not removed.")
         if answer != name:
             _die(f"Not removed: you typed '{answer}', the app is '{name}'.")
-    path = f"/api/v1/apps/{quote(name)}" + ("?binds=1" if args.with_binds else "")
-    raw = _api(session, "DELETE", path, None)
+    raw = _api(session, "DELETE", f"/api/v1/apps/{quote(name)}", None)
     if _json:
         print(raw)
         return
@@ -741,23 +744,16 @@ def _cmd_app_rm(args: argparse.Namespace) -> None:
         print(raw)
         return
     print(f"removed {name}")
-    for bind in data.get("binds_removed") or []:
-        if isinstance(bind, dict):
-            print(f"removed bind {bind.get('host')} → {bind.get('dial')}")
-    left = [bind for bind in data.get("binds_left") or [] if isinstance(bind, dict)]
-    if left:
-        print(f"These binds still point at {name}'s containers. Caddy answers them with an error now.")
-        print("Remove them with:")
-        for bind in left:
-            print(f"  yard bind rm {bind.get('host')}")
-        print("Next time, yard app rm --with-binds removes them in the same step.")
-    error = str(data.get("binds_error") or "")
+    hosts = [str(host) for host in data.get("hosts") or []]
+    if hosts:
+        print(f"removed the Caddy site: {', '.join(hosts)}")
+    error = str(data.get("caddy_error") or "")
     if error:
-        print(f"Could not read the binds: {error}\nCheck with: yard bind ls")
+        print(f"Caddy did not load the config without the site: {error}\nCheck with: yard status --full")
 
 
-def _rm_preview(session: Client, name: str, with_binds: bool) -> None:
-    """What `app rm` takes away: the containers, the files, the binds. One page read."""
+def _rm_preview(session: Client, name: str) -> None:
+    """What `app rm` takes away: the containers, the files, the Caddy site. One page read."""
     page = _object(_api(session, "GET", f"/api/v1/apps/{quote(name)}", None))
     page = page if isinstance(page, dict) else {}
     env_file = str(page.get("env_file") or "")
@@ -765,19 +761,14 @@ def _rm_preview(session: Client, name: str, with_binds: bool) -> None:
     rows = [row for row in page.get("rows") or [] if isinstance(row, dict)]
     containers = ", ".join(str(row["container"]) for row in rows if row.get("container"))
     data = sum(int(row.get("data") or 0) for row in rows if isinstance(row.get("data"), int))
-    page_binds = [bind for bind in page.get("binds") or [] if isinstance(bind, dict) and bind.get("host")]
+    hosts = [str(host) for host in page.get("hosts") or []]
     print(f"This deletes the app {name}:")
     print(f"  {'containers'.ljust(10)}  {containers or '(none)'}")
     print(f"  {'clone'.ljust(10)}  {app_dir}/repo")
     print(f"  {'env file'.ljust(10)}  {env_file}")
     print(f"  {'data'.ljust(10)}  {app_dir}/data ({format_bytes(data)})")
-    if page_binds:
-        if with_binds:
-            print("These binds also go (--with-binds):")
-        else:
-            print("These binds stay and will point at nothing:")
-        for bind in page_binds:
-            print(f"  {bind.get('host')} → {bind.get('dial')}")
+    if hosts:
+        print(f"  {'caddy site'.ljust(10)}  {', '.join(hosts)}")
     print("This cannot be undone. Copy the data directory first if you need it.")
 
 
@@ -796,7 +787,7 @@ def _print_deploy_note(note: dict, name: str) -> None:
         print(f"Read why: yard app logs --deploy --app {name}, then yard app logs --app {name}")
 
 
-def _cmd_env_show(args: argparse.Namespace) -> None:
+def _cmd_env_cat(args: argparse.Namespace) -> None:
     session = _load(args)
     name = _app_name(session, args)
     raw = _api(session, "GET", f"/api/v1/apps/{quote(name)}/env", None)
@@ -808,6 +799,16 @@ def _cmd_env_show(args: argparse.Namespace) -> None:
         print(raw)
         return
     print(format_env(env), end="")
+
+
+def _cmd_env_get(args: argparse.Namespace) -> None:
+    session = _load(args)
+    name = _app_name(session, args)
+    env = _object(_api(session, "GET", f"/api/v1/apps/{quote(name)}/env", None))
+    if not isinstance(env, dict) or args.key not in env:
+        _die(f"{args.key} is not set for {name}")
+    value = str(env[args.key])
+    print(json.dumps({args.key: value}) if _json else value)
 
 
 def _env_saved(name: str) -> None:
@@ -861,39 +862,63 @@ def _cmd_env_edit(args: argparse.Namespace) -> None:
     _env_saved(name)
 
 
-def _cmd_bind_set(args: argparse.Namespace) -> None:
+def _site_path(name: str) -> str:
+    return f"/api/v1/apps/{quote(name)}/caddy"
+
+
+def _print_site_saved(name: str, raw: str) -> None:
+    if _json:
+        print(raw)
+        return
+    data = _object(raw)
+    hosts = [str(host) for host in data.get("hosts") or []] if isinstance(data, dict) else []
+    if hosts:
+        print(f"Saved. Caddy serves {', '.join(hosts)} for {name}.")
+    else:
+        print(f"Saved. Caddy serves no host for {name}.")
+
+
+def _cmd_caddy_cat(args: argparse.Namespace) -> None:
     session = _load(args)
-    dial = args.container.strip() or f"{_app_name(session, args)}-app-1"
-    raw = _api(
-        session,
-        "PUT",
-        f"/api/v1/binds/{quote(args.host, safe='')}",
-        {"dial": dial, "try": args.window},
+    text = _api(session, "GET", _site_path(_app_name(session, args)), None)
+    if text:
+        sys.stdout.write(text + "\n")
+
+
+def _cmd_caddy_edit(args: argparse.Namespace) -> None:
+    """$EDITOR on the site file, or the file from stdin. A refused file opens the editor again."""
+    session = _load(args)
+    name = _app_name(session, args)
+    if not sys.stdin.isatty():
+        raw = _api(session, "PUT", _site_path(name), _read_stdin().encode())
+        _print_site_saved(name, raw)
+        return
+    current = _api(session, "GET", _site_path(name), None)
+    start = current + "\n" if current else _site_example(name)
+    text = _edit_text(start, suffix=".caddy")
+    while True:
+        if text == start:
+            print("No change.")
+            return
+        code, raw = _api_try(session, "PUT", _site_path(name), text.encode())
+        if code < 300:
+            _print_site_saved(name, raw)
+            return
+        print(explain(raw), file=sys.stderr)
+        if _ask("Edit again? [Y/n] ", stopped="Not saved.").lower().startswith("n"):
+            _die("Not saved. Caddy keeps the site it had.")
+        start, text = "", _edit_text(text, suffix=".caddy")
+
+
+def _site_example(name: str) -> str:
+    return (
+        f"# The Caddy site for {name}. Yard loads it on save; Caddy checks it first.\n"
+        "# Docs: https://caddyserver.com/docs/caddyfile\n"
+        "#\n"
+        f"# {name}.example.com {{\n"
+        f"# \treverse_proxy {name}-app-1:8000\n"
+        "# }\n"
     )
-    _print_binds(raw)
-
-
-def _cmd_bind_ls(args: argparse.Namespace) -> None:
-    raw = _api(_load(args), "GET", "/api/v1/binds", None)
-    _print_binds(raw)
-
-
-def _cmd_bind_rm(args: argparse.Namespace) -> None:
-    raw = _api(_load(args), "DELETE", "/api/v1/binds/" + quote(args.host, safe=""), None)
-    data = _object(raw)
-    if _json or not isinstance(data, dict):
-        print(raw)
-        return
-    print(f"removed {data.get('host') or args.host}")
-
-
-def _print_binds(raw: str) -> None:
-    data = _object(raw)
-    rows = [data] if isinstance(data, dict) else data
-    if _json or not isinstance(rows, list):
-        print(raw)
-        return
-    print(format_binds(rows, color=_color_on()), end="")
 
 
 def _cmd_token_list(args: argparse.Namespace) -> None:
@@ -1402,8 +1427,8 @@ def _read_stdin() -> str:
     return raw.decode()
 
 
-def _edit_text(initial: str) -> str:
-    handle = tempfile.NamedTemporaryFile(prefix="yard-env-", delete=False)
+def _edit_text(initial: str, suffix: str = ".env") -> str:
+    handle = tempfile.NamedTemporaryFile(prefix="yard-", suffix=suffix, delete=False)
     path = Path(handle.name)
     try:
         path.write_text(initial)
@@ -1464,7 +1489,7 @@ def _parser() -> argparse.ArgumentParser:
     for name, help_text, build in (
         ("app", "apps", _app_parser),
         ("env", "app env", _env_parser),
-        ("bind", "binds", _bind_parser),
+        ("caddy", "the Caddy site of an app", _caddy_parser),
         ("token", "tokens", _token_parser),
         ("forge", "git forges", _forge_parser),
         ("repo", "repos on the forge", _repo_parser),
@@ -1509,8 +1534,13 @@ def _app_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
     new.add_argument("--repo", default="", help="the repo https URL")
     new.add_argument("--ref", default="", help="the branch to follow")
     new.add_argument("--trigger", default="", help="push or manual")
-    new.add_argument("--public", metavar="HOST", default="", help="a name on the public internet")
-    new.add_argument("--try", dest="window", default=None, help="how long caddy waits for the upstream")
+    new.add_argument(
+        "--caddy",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="a public host; Caddy sends every host to the app container",
+    )
     new.add_argument("--no-deploy", action="store_true", help="create the app without a first deploy")
     new.add_argument("-e", "--env", action="append", default=[], metavar="KEY=VALUE", help="a setting the app reads")
     new.add_argument("--env-file", metavar="PATH", default="", help="a dotenv file of settings")
@@ -1518,7 +1548,6 @@ def _app_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
     new.add_argument(
         "--runs", default="", help="auto, a path in the repo, yard:<template>, an image name:tag, or an https URL"
     )
-    new.add_argument("--port", type=int, default=0, help="the port --public binds (default: the app's, else 8000)")
     _add_app_flag(new, "the app name; the repo and branch give a default")
     new.set_defaults(func=_cmd_app_new)
 
@@ -1555,7 +1584,6 @@ def _app_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
     rm = subs.add_parser("rm", help="remove an app", parents=[common])
     _add_app_flag(rm)
     rm.add_argument("--yes", action="store_true", help="remove without confirming")
-    rm.add_argument("--with-binds", action="store_true", help="remove the app's binds too")
     rm.set_defaults(func=_cmd_app_rm)
 
 
@@ -1586,9 +1614,14 @@ def _repo_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentPars
 
 
 def _env_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
-    show = subs.add_parser("show", help="the env file", parents=[common])
-    _add_app_flag(show)
-    show.set_defaults(func=_cmd_env_show)
+    cat = subs.add_parser("cat", help="print the env file", parents=[common])
+    _add_app_flag(cat)
+    cat.set_defaults(func=_cmd_env_cat)
+
+    get = subs.add_parser("get", help="print one value", parents=[common])
+    get.add_argument("key", metavar="KEY")
+    _add_app_flag(get)
+    get.set_defaults(func=_cmd_env_get)
 
     set_ = subs.add_parser("set", help="set env values", parents=[common])
     set_.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
@@ -1605,25 +1638,14 @@ def _env_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
     edit.set_defaults(func=_cmd_env_edit)
 
 
-def _bind_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
-    listed = subs.add_parser("ls", help="the binds", parents=[common])
-    listed.set_defaults(func=_cmd_bind_ls)
+def _caddy_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
+    cat = subs.add_parser("cat", help="print the site file", parents=[common])
+    _add_app_flag(cat)
+    cat.set_defaults(func=_cmd_caddy_cat)
 
-    set_ = subs.add_parser("set", help="bind a host to a container", parents=[common])
-    set_.add_argument("host", help="a name on the public internet")
-    set_.add_argument(
-        "container",
-        nargs="?",
-        default="",
-        help="CONTAINER or CONTAINER:PORT; the app container by default",
-    )
-    set_.add_argument("--try", dest="window", default="10s", help="how long caddy waits for the upstream")
-    _add_app_flag(set_)
-    set_.set_defaults(func=_cmd_bind_set)
-
-    rm = subs.add_parser("rm", help="remove a bind", parents=[common])
-    rm.add_argument("host", help="the public name")
-    rm.set_defaults(func=_cmd_bind_rm)
+    edit = subs.add_parser("edit", help="edit the site file; Caddy loads it on save", parents=[common])
+    _add_app_flag(edit)
+    edit.set_defaults(func=_cmd_caddy_edit)
 
 
 def _token_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:

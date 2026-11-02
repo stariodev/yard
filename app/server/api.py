@@ -12,7 +12,7 @@ from stario import Context, Handler, Middleware, Route, Writer, json
 from stario.http.middleware import catch_errors
 from stario.json import JsonValue
 
-from app.server import apps, binds, doctor, journal, repos, status
+from app.server import apps, doctor, journal, repos, sites, status
 from app.server.forges import Forge, GitHub, Origin
 from app.server.logfilter import Held, LogFilter
 from app.server.store import App, Config, Deployed, Store, read_deployed
@@ -41,9 +41,8 @@ APP_FILE = Route("GET /api/v1/apps/{name}/files/{which}")
 ENV = Route("GET /api/v1/apps/{name}/env")
 ENV_PATCH = Route("PATCH /api/v1/apps/{name}/env")
 ENV_PUT = Route("PUT /api/v1/apps/{name}/env")
-BINDS = Route("GET /api/v1/binds")
-BIND_PUT = Route("PUT /api/v1/binds/{host}")
-BIND_DELETE = Route("DELETE /api/v1/binds/{host}")
+CADDY = Route("GET /api/v1/apps/{name}/caddy")
+CADDY_PUT = Route("PUT /api/v1/apps/{name}/caddy")
 PRUNE = Route("POST /api/v1/prune")
 TOKENS = Route("GET /api/v1/tokens")
 TOKEN_CREATE = Route("POST /api/v1/tokens")
@@ -95,10 +94,6 @@ def app_json(app: App, deployed: Deployed | None = None) -> dict[str, Any]:
     }
 
 
-def bind_json(bind: binds.Bind) -> dict[str, str]:
-    return {"host": bind.host, "dial": bind.dial, "id": bind.id, "try": bind.window, "state": bind.state}
-
-
 def page_json(page: status.Page, deployed: Deployed | None = None, job: Job | None = None) -> dict[str, Any]:
     return {
         "app": app_json(page.app, deployed),
@@ -107,7 +102,7 @@ def page_json(page: status.Page, deployed: Deployed | None = None, job: Job | No
         "sha": page.sha,
         "env_file": page.env_file,
         "rows": [asdict(row) for row in page.rows],
-        "binds": page.binds,
+        "hosts": page.hosts,
         "deploys": page.deploys,
         "log": page.log,
         "template_moved": page.template_moved,
@@ -788,6 +783,8 @@ class AppsPage:
         app.add(ENV, self.env_show, middleware=middleware)
         app.add(ENV_PATCH, self.env_patch, middleware=middleware)
         app.add(ENV_PUT, self.env_put, middleware=middleware)
+        app.add(CADDY, self.caddy_show, middleware=middleware)
+        app.add(CADDY_PUT, self.caddy_put, middleware=middleware)
 
     async def apps_list(self, _c: Context, w: Writer) -> None:
         w.json([app_json(app, read_deployed(self.yard.config, app.name)) for app in self.yard.store.list_apps()])
@@ -845,14 +842,10 @@ class AppsPage:
 
     async def app_delete(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]
-        removed = await apps.delete(self.yard, name, with_binds=c.req.query.get("binds") == "1", actor=_actor(c))
-        body: dict[str, Any] = {
-            "name": removed.name,
-            "binds_removed": [{"host": host, "dial": dial} for host, dial in removed.binds_removed],
-            "binds_left": [{"host": host, "dial": dial} for host, dial in removed.binds_left],
-        }
-        if removed.binds_error:
-            body["binds_error"] = removed.binds_error
+        removed = await apps.delete(self.yard, name, actor=_actor(c))
+        body: dict[str, Any] = {"name": removed.name, "hosts": removed.hosts}
+        if removed.caddy_error:
+            body["caddy_error"] = removed.caddy_error
         w.json(cast(JsonValue, body))
 
     async def app_deploy(self, c: Context, w: Writer) -> None:
@@ -971,6 +964,24 @@ class AppsPage:
         _env_set_event(self.yard.config, c, name, sorted(env), removed)
         w.json({"keys": keys})
 
+    async def caddy_show(self, c: Context, w: Writer) -> None:
+        """The site file as text/plain; empty when the app has none."""
+        name = c.match.params["name"]
+        self.yard.store.app(name)
+        w.text(sites.get_site(self.yard, name))
+
+    async def caddy_put(self, c: Context, w: Writer) -> None:
+        """The whole site file as the body. Caddy checks it on load; empty text removes it."""
+        name = c.match.params["name"]
+        self.yard.store.app(name)
+        raw = await c.req.body()
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError as exc:
+            raise YardError(400, "bad_caddyfile", "a site file is UTF-8 text") from exc
+        hosts = await sites.set_site(self.yard, name, text, actor=_actor(c))
+        w.json(cast(JsonValue, {"hosts": hosts}))
+
 
 @dataclass(frozen=True, slots=True)
 class AccessPage:
@@ -979,33 +990,9 @@ class AccessPage:
     yard: Yard
 
     def register(self, app: StarioApp, middleware: Sequence[Middleware] = ()) -> None:
-        app.add(BINDS, self.binds_list, middleware=middleware)
-        app.add(BIND_PUT, self.binds_put, middleware=middleware)
-        app.add(BIND_DELETE, self.binds_delete, middleware=middleware)
         app.add(TOKENS, self.tokens_list, middleware=middleware)
         app.add(TOKEN_CREATE, self.tokens_create, middleware=middleware)
         app.add(TOKEN_DELETE, self.tokens_delete, middleware=middleware)
-
-    async def binds_list(self, _c: Context, w: Writer) -> None:
-        w.json(cast(JsonValue, [bind_json(bind) for bind in await binds.list_binds(self.yard)]))
-
-    async def binds_put(self, c: Context, w: Writer) -> None:
-        data = await json_object(c)
-        dial, window = data.get("dial", ""), data.get("try", "10s")
-        if not isinstance(dial, str) or not isinstance(window, str):
-            raise YardError(
-                400,
-                "bad_json",
-                "bad json",
-                help_text="dial is a string. try is a duration.",
-                example='{"dial": "heldso-app-1"}',
-            )
-        host = c.match.params["host"]
-        w.json(cast(JsonValue, bind_json(await binds.put_bind(self.yard, host, dial, window, actor=_actor(c)))))
-
-    async def binds_delete(self, c: Context, w: Writer) -> None:
-        host = await binds.delete_bind(self.yard, c.match.params["host"], actor=_actor(c))
-        w.json({"host": host})
 
     async def tokens_list(self, _c: Context, w: Writer) -> None:
         w.json([asdict(token) for token in self.yard.store.list_tokens()])

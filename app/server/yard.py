@@ -72,6 +72,8 @@ class Yard:
         self.tips: dict[str, Tip] = {}
         self.deploys: dict[str, Job] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        # One lock for every site file write and Caddy load.
+        self.sites_lock = asyncio.Lock()
         self.checked: dict[str, float] = {}
         self.queued: dict[str, Callable[[], Awaitable[None]]] = {}
         self.tasks: list[asyncio.Task[None]] = []

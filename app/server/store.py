@@ -40,6 +40,8 @@ class Config:
     journal_dir: Path = Path("/var/log/journal")
     journalctl_bin: str = "journalctl"
     journal_socket: Path = Path("/run/systemd/journal/socket")
+    # The main Caddyfile on Caddy's disk. Caddy resolves its imports there too.
+    caddyfile: Path = Path("/etc/caddy/Caddyfile")
 
     @property
     def token_file(self) -> Path:
@@ -65,6 +67,13 @@ class Config:
 
     def caddy_data(self) -> Path:
         return self.app_dir("yard") / "caddy" / "data"
+
+    def caddy_sites(self) -> Path:
+        """The site files. Caddy mounts this directory read-only and imports *.caddy."""
+        return self.app_dir("yard") / "caddy" / "sites"
+
+    def site(self, name: str) -> Path:
+        return self.caddy_sites() / f"{name}.caddy"
 
     @classmethod
     def from_env(cls) -> Config:

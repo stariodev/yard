@@ -41,7 +41,7 @@ async def boot(yard: Yard, app: App) -> None:
     (config.root / "apps").mkdir(parents=True, exist_ok=True)
     (config.root / "tokens").mkdir(mode=0o700, parents=True, exist_ok=True)
     caddy_root = config.app_dir("yard") / "caddy"
-    for part in ("config", "data", "run"):
+    for part in ("config", "data", "run", "sites"):
         (caddy_root / part).mkdir(parents=True, exist_ok=True)
     for forge in yard.forges.values():
         forge.dir.mkdir(parents=True, exist_ok=True)

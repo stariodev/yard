@@ -1,28 +1,33 @@
+import asyncio
 import json
+import shutil
+import socket
 import socketserver
+import subprocess
 import tempfile
 import threading
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from app.server.caddy import (
-    Caddy,
-    normalize_dial,
-    proxy_route,
-    read_routes,
-)
-from app.shared import YardError, check_window
+from app.server import sites
+from app.server.caddy import Caddy, hosts
+from app.shared import YardError
+from tests.server.conftest import FakeCaddy, make_yard
 
 OPS = Path(__file__).resolve().parents[2] / "ops"
 
 
 class _Admin(socketserver.UnixStreamServer):
-    """A fake Caddy admin API on a unix socket. `routes` is the live array."""
+    """A fake Caddy admin API on a unix socket. `answer` is the code and body of every reply."""
 
-    routes: list = []
+    answer: tuple[int, bytes] = (200, b"{}")
     calls: list = []
 
 
@@ -31,107 +36,159 @@ class _Handler(BaseHTTPRequestHandler):
     def _admin(self) -> _Admin:
         return cast("_Admin", self.server)
 
-    def _reply(self, code: int = 200, body=b""):
+    def do_POST(self):
+        length = int(self.headers.get("content-length") or 0)
+        self._admin.calls.append((self.path, self.headers.get("content-type"), self.rfile.read(length)))
+        code, body = self._admin.answer
         self.send_response(code)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _body(self) -> dict:
-        length = int(self.headers.get("content-length") or 0)
-        return json.loads(self.rfile.read(length) or b"{}")
-
-    def do_GET(self):
-        if self.path == "/config/apps/http/servers/yard/routes":
-            self._reply(200, json.dumps(self._admin.routes).encode())
-        elif self.path == "/config/":
-            self._reply(200, b"{}")
-        else:
-            self._reply(404, b"not found")
-
-    def do_PATCH(self):
-        self._admin.calls.append(("PATCH", self.path, self._body()))
-        self._reply(200, b"{}")
-
-    def do_POST(self):
-        self._admin.calls.append(("POST", self.path, self._body()))
-        self._reply(201, b"{}")
-
-    def do_PUT(self):
-        self._admin.calls.append(("PUT", self.path, self._body()))
-        self._reply(200, b"{}")
-
-    def do_DELETE(self):
-        self._admin.calls.append(("DELETE", self.path))
-        self._reply(200, b"{}")
-
     def log_message(self, format: str, *args) -> None:
         pass
 
 
-def _serve(routes: list):
+def _serve(answer: tuple[int, bytes]) -> tuple[Caddy, _Admin]:
     # AF_UNIX paths cap at ~104 characters. pytest's tmp_path is deeper than that.
     sock = Path(tempfile.mkdtemp(prefix="yd-")) / "s.sock"
     server = _Admin(str(sock), _Handler)
-    server.routes = routes
+    server.answer = answer
     server.calls = []
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     return Caddy(sock), server
 
 
-async def test_request_round_trip_on_a_unix_socket(tmp_path: Path):
-    client, server = _serve(
-        [
-            {
-                "@id": "yard-heldso.example.com",
-                "match": [{"host": ["heldso.example.com"]}],
-                "handle": [{"upstreams": [{"dial": "heldso:8000"}]}],
-            }
-        ],
-    )
-    code, raw = await client.request("GET", "/config/apps/http/servers/yard/routes")
-    assert code == 200
-    assert read_routes(raw) == [
-        {"host": "heldso.example.com", "dial": "heldso:8000", "id": "yard-heldso.example.com", "try": ""}
-    ]
-    code, _ = await client.request("POST", "/config/apps/http/servers/yard/routes", b"{}")
-    assert code == 201
-    assert server.calls[0][0] == "POST"
+async def test_load_imports_the_main_caddyfile():
+    client, server = _serve((200, b""))
+    await client.load(Path("/etc/caddy/Caddyfile"))
+    assert server.calls == [("/load", "text/caddyfile", b"import /etc/caddy/Caddyfile\n")]
     server.shutdown()
 
 
-async def test_request_failures(tmp_path: Path):
-    client = Caddy(tmp_path / "missing.sock")
+async def test_adapt_returns_the_result():
+    client, server = _serve((200, json.dumps({"result": {"apps": {}}}).encode()))
+    assert await client.adapt("a.example.com {\n}\n") == {"apps": {}}
+    assert server.calls[0][2] == b"a.example.com {\n}\n"
+    server.shutdown()
+
+
+async def test_caddy_400_is_the_callers_400():
+    error = {"error": "adapting config using caddyfile adapter: /etc/caddy/sites/a.caddy:2: unrecognized directive: x"}
+    client, server = _serve((400, json.dumps(error).encode()))
     with pytest.raises(YardError) as caught:
-        await client.request("GET", "/config/")
-    assert caught.value.status == 502
-    assert caught.value.code == "caddy"
+        await client.load(Path("/etc/caddy/Caddyfile"))
+    assert caught.value.status == 400
+    assert caught.value.code == "bad_caddyfile"
+    assert caught.value.message == "/etc/caddy/sites/a.caddy:2: unrecognized directive: x"
+    server.shutdown()
 
-    client, _server = _serve([])
+
+async def test_other_failures_are_a_502(tmp_path: Path):
     with pytest.raises(YardError) as caught:
-        await client.request("GET", "/nope")
-    assert caught.value.status == 502
-    assert caught.value.code == "caddy"
+        await Caddy(tmp_path / "missing.sock").request("GET", "/config/")
+    assert (caught.value.status, caught.value.code) == (502, "caddy")
+
+    client, server = _serve((500, b"boom"))
+    with pytest.raises(YardError) as caught:
+        await client.load(Path("/etc/caddy/Caddyfile"))
+    assert (caught.value.status, caught.value.code) == (502, "caddy")
+    server.shutdown()
 
 
-def test_proxy_route_matches_the_host():
-    body = proxy_route("heldso.example.com", "heldso:8000", "30s")
-    assert body["match"] == [{"host": ["heldso.example.com"]}]
+def test_hosts_reads_the_top_routes_of_every_server():
+    config = {
+        "apps": {
+            "http": {
+                "servers": {
+                    "srv0": {
+                        "routes": [
+                            {"match": [{"host": ["a.example.com", "b.example.com"]}], "handle": []},
+                            {"handle": []},
+                        ]
+                    },
+                    "srv1": {"routes": [{"match": [{"host": ["c.example.com", "a.example.com"]}]}]},
+                }
+            }
+        }
+    }
+    assert hosts(config) == ["a.example.com", "b.example.com", "c.example.com"]
+    assert hosts({}) == []
 
 
-def test_the_committed_caddy_json():
-    doc = json.loads((OPS / "caddy.json").read_text())
-    assert doc["admin"] == {"listen": "unix//run/caddy/admin.sock"}
-    http = doc["apps"]["http"]
-    assert http["https_port"] == 443
-    server = http["servers"]["yard"]
-    assert server["listen"] == [":443"]
-    assert server["automatic_https"] == {"disable_redirects": True}
-    assert server["protocols"] == ["h1", "h2", "h3"]
-    assert server["routes"] == []
-    issuer = doc["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]
+async def test_set_site_writes_the_file_and_loads_caddy(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    fake = FakeCaddy()
+    yard.caddy = fake
+    found = await sites.set_site(yard, "heldso", "heldso.example.com, www.heldso.example.com {\n}\n")
+    assert found == ["heldso.example.com", "www.heldso.example.com"]
+    assert yard.config.site("heldso").read_text() == "heldso.example.com, www.heldso.example.com {\n}\n"
+    assert fake.loads == 1
+    assert sites.get_site(yard, "heldso").startswith("heldso.example.com")
+
+
+async def test_a_refused_site_puts_the_old_file_back(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    yard.caddy = FakeCaddy()
+    await sites.set_site(yard, "heldso", "heldso.example.com {\n}\n")
+    yard.caddy = FakeCaddy(refuse="ambiguous site definition: heldso.example.com")
+    with pytest.raises(YardError) as caught:
+        await sites.set_site(yard, "heldso", "bad {\n")
+    assert caught.value.status == 400
+    assert yard.config.site("heldso").read_text() == "heldso.example.com {\n}\n"
+
+    with pytest.raises(YardError):
+        await sites.set_site(yard, "other", "other.example.com {\n}\n")
+    assert not yard.config.site("other").exists()
+
+
+async def test_empty_text_removes_the_site(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    yard.caddy = FakeCaddy()
+    await sites.set_site(yard, "heldso", "heldso.example.com {\n}\n")
+    assert await sites.set_site(yard, "heldso", "  \n") == []
+    assert not yard.config.site("heldso").exists()
+    assert sites.get_site(yard, "heldso") == ""
+
+
+async def test_a_site_file_has_a_size_limit(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    yard.caddy = FakeCaddy()
+    with pytest.raises(YardError) as caught:
+        await sites.set_site(yard, "heldso", "#" * (sites.MAX_BYTES + 1))
+    assert caught.value.code == "too_large"
+
+
+async def test_remove_site_reports_a_refused_load(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    yard.caddy = FakeCaddy()
+    assert await sites.remove_site(yard, "heldso") == ""
+    await sites.set_site(yard, "heldso", "heldso.example.com {\n}\n")
+    yard.caddy = FakeCaddy(refuse="no socket")
+    assert await sites.remove_site(yard, "heldso") == "no socket"
+    assert not yard.config.site("heldso").exists()
+
+
+def test_the_committed_caddyfile():
+    text = (OPS / "Caddyfile").read_text()
+    assert "admin unix//run/caddy/admin.sock" in text
+    assert "auto_https disable_redirects" in text
+    assert "disable_http_challenge" in text
+    assert "protocols h1 h2 h3" in text
+    assert text.rstrip().endswith("import /etc/caddy/sites/*.caddy")
+
+
+@pytest.mark.skipif(shutil.which("caddy") is None, reason="needs the caddy binary")
+def test_the_committed_caddyfile_adapts():
+    proc = subprocess.run(
+        ["caddy", "adapt", "--config", str(OPS / "Caddyfile")], capture_output=True, text=True, check=True
+    )
+    config = json.loads(proc.stdout)
+    assert config["admin"] == {"listen": "unix//run/caddy/admin.sock"}
+    issuer = config["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]
     assert issuer["challenges"]["http"]["disabled"] is True
+    # A glob that matches no site file is a warning, not an error.
+    assert "No files matching import glob pattern" in proc.stderr
 
 
 def test_compose_spec_matches_the_document():
@@ -142,15 +199,16 @@ def test_compose_spec_matches_the_document():
         "${YARD_ROOT}/apps/yard/caddy/config:/config",
         "${YARD_ROOT}/apps/yard/caddy/data:/data",
         "${YARD_ROOT}/apps/yard/caddy/run:/run/caddy",
-        "${CHECKOUT}/ops/caddy.json:/etc/caddy/yard.json:ro",
-        'command: ["run", "--config", "/etc/caddy/yard.json", "--resume"]',
-        "CADDY_ADMIN: unix//run/caddy/admin.sock",
+        "${CHECKOUT}/ops/Caddyfile:/etc/caddy/Caddyfile:ro",
+        "${YARD_ROOT}/apps/yard/caddy/sites:/etc/caddy/sites:ro",
+        'command: ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]',
         "8443:443/tcp",
         "8443:443/udp",
         "127.0.0.1:8000:8000",
         "CONTAINER_HOST: unix:///run/podman/podman.sock",
     ):
         assert part in spec
+    assert "--resume" not in spec
     assert "8443:8443" not in spec
     assert "COMPOSE_ENV_FILE" not in spec
     # Compose names the containers yard-app-1 and yard-caddy-1 like every app.
@@ -159,38 +217,85 @@ def test_compose_spec_matches_the_document():
     assert "labels:" not in spec
 
 
-def test_dial_and_window():
-    assert normalize_dial("heldso") == "heldso:8000"
-    assert normalize_dial("http://heldso:9000/health") == "heldso:9000"
-    assert check_window("") == "10s"
-    assert check_window("30s") == "30s"
-    with pytest.raises(YardError) as caught:
-        normalize_dial("bad dial")
-    assert caught.value.code == "bad_dial"
-    with pytest.raises(YardError) as caught:
-        check_window("soon")
-    assert caught.value.code == "bad_window"
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
-def test_proxy_route_keeps_one_id():
-    body = proxy_route("heldso.example.com", "heldso:8000", "30s")
-    assert body["@id"] == "yard-heldso.example.com"
-    assert body["match"] == [{"host": ["heldso.example.com"]}]
-    handle = body["handle"]
-    assert isinstance(handle, list)
-    proxy = handle[0]
-    assert isinstance(proxy, dict)
-    assert proxy["load_balancing"] == {"try_duration": "30s", "try_interval": "250ms"}
-    assert proxy["upstreams"] == [{"dial": "heldso:8000"}]
-
-
-def test_read_routes_marks_a_route_without_an_id():
-    raw = json.dumps(
-        [
-            {"match": [{"host": ["other.example.com"]}]},
-            {"@id": "yard-heldso.example.com", "match": [{"host": ["heldso.example.com"]}], "handle": []},
-        ]
+@pytest.fixture
+def real_caddy() -> Iterator[tuple[Path, Caddy, int]]:
+    """A real Caddy on a short temp root: the main Caddyfile imports the Yard sites directory."""
+    root = Path(tempfile.mkdtemp(prefix="yc-"))
+    sites_dir = root / "apps" / "yard" / "caddy" / "sites"
+    sites_dir.mkdir(parents=True)
+    sock, port = root / "a.sock", _free_port()
+    main = root / "Caddyfile"
+    main.write_text(
+        "{\n"
+        f"\tadmin unix/{sock}\n"
+        f"\thttp_port {port}\n"
+        f"\thttps_port {_free_port()}\n"
+        "\tauto_https off\n"
+        "}\n\n"
+        f"import {sites_dir}/*.caddy\n"
     )
-    rows = read_routes(raw)
-    assert rows[0]["id"] == ""
-    assert rows[1]["id"] == "yard-heldso.example.com"
+    proc = subprocess.Popen(
+        ["caddy", "run", "--config", str(main), "--adapter", "caddyfile"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(100):
+            if sock.exists():
+                break
+            proc.poll()
+            assert proc.returncode is None, "caddy exited at start"
+            threading.Event().wait(0.05)
+        yield root, Caddy(sock), port
+    finally:
+        proc.terminate()
+        proc.wait(5)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _get(port: int, host: str) -> tuple[int, str]:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"Host": host})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, ""
+    except urllib.error.URLError:
+        # No site left: Caddy closes the listener.
+        return 0, ""
+
+
+@pytest.mark.skipif(shutil.which("caddy") is None, reason="needs the caddy binary")
+async def test_real_caddy_loads_checks_and_rolls_back(real_caddy: tuple[Path, Caddy, int]):
+    root, client, port = real_caddy
+    yard = make_yard(root)
+    yard.config = replace(yard.config, caddyfile=root / "Caddyfile")
+    yard.caddy = client
+
+    site = f'http://a.localhost:{port} {{\n\trespond "A"\n}}\n'
+    assert await sites.set_site(yard, "heldso", site) == ["a.localhost"]
+    assert await asyncio.to_thread(_get, port, "a.localhost") == (200, "A")
+
+    # Another app claims the same host: Caddy refuses, and the old config keeps serving.
+    with pytest.raises(YardError) as caught:
+        await sites.set_site(yard, "other", f'http://a.localhost:{port} {{\n\trespond "B"\n}}\n')
+    assert caught.value.code == "bad_caddyfile"
+    assert "ambiguous site definition" in caught.value.message
+    assert not yard.config.site("other").exists()
+    assert await asyncio.to_thread(_get, port, "a.localhost") == (200, "A")
+
+    # A bad directive names the file and the line.
+    with pytest.raises(YardError) as caught:
+        await sites.set_site(yard, "heldso", f"http://a.localhost:{port} {{\n\tnot_a_directive\n}}\n")
+    assert "heldso.caddy:2" in caught.value.message
+    assert yard.config.site("heldso").read_text() == site
+
+    assert (await sites.check(yard))[0]
+    assert await sites.remove_site(yard, "heldso") == ""
+    assert (await asyncio.to_thread(_get, port, "a.localhost"))[1] != "A"

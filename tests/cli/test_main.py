@@ -1,6 +1,7 @@
 import argparse
 import html
 import http.client
+import io
 import json
 import re
 import stat
@@ -37,10 +38,6 @@ def test_resource_ls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixt
             ),
         ),
         "/api/v1/tokens": (200, json.dumps([{"name": "ada", "created": stamp(days=1)}])),
-        "/api/v1/binds": (
-            200,
-            json.dumps([{"host": "heldso.example.com", "dial": "heldso:8000", "state": "up"}]),
-        ),
     }
 
     def fake_api_try(client, method, path, body, timeout=None):
@@ -53,8 +50,6 @@ def test_resource_ls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixt
     assert "heldso" in capsys.readouterr().out
     main(["token", "ls", "--text"])
     assert "ada" in capsys.readouterr().out
-    main(["bind", "ls", "--text"])
-    assert "heldso.example.com" in capsys.readouterr().out
 
 
 def test_main_end_to_end(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
@@ -117,7 +112,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
         },
         "env_file": "/srv/yard/apps/heldso/env",
         "rows": [report["rows"][0]],
-        "binds": [{"host": "heldso.example.com", "dial": "heldso:8000"}],
+        "hosts": ["heldso.example.com"],
         "deploys": [],
         "log": "one\ntwo\n",
     }
@@ -129,7 +124,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
             json.dumps(
                 [
                     {"name": "podman", "ok": True, "detail": "podman 5.3.1"},
-                    {"name": "caddy routes", "ok": False, "detail": "missing: shop.example.com"},
+                    {"name": "caddy config", "ok": False, "detail": "ambiguous site definition: shop.example.com"},
                 ]
             ),
         ),
@@ -143,7 +138,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 
     main(["app", "status", "--app", "heldso", "--text"])
     out = capsys.readouterr().out
-    assert "heldso.example.com  →  heldso:8000" in out
+    assert "caddy heldso.example.com" in out
     assert "containers" in out
     assert "no deploys yet" in out
     assert "  two" in out
@@ -153,7 +148,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     assert exited.value.code == 1
     out = capsys.readouterr().out
     assert "ok   podman" in out
-    assert "FAIL caddy routes  missing: shop.example.com" in out
+    assert "FAIL caddy config  ambiguous site definition: shop.example.com" in out
 
 
 def test_app_deploy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
@@ -200,7 +195,7 @@ _RM_PAGE = {
     "app": {"name": "heldso"},
     "env_file": "/srv/yard/apps/heldso/env",
     "rows": [{"container": "heldso-app-1", "data": 1_200_000_000}],
-    "binds": [{"host": "heldso.example.com", "dial": "heldso-app-1:8000"}],
+    "hosts": ["heldso.example.com"],
     "deploys": [],
     "log": "",
 }
@@ -215,12 +210,8 @@ def test_app_rm_refuses_a_non_tty(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert "--yes" in err
 
 
-def test_app_rm_confirms_and_lists_the_binds_left(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
-    deleted = {
-        "name": "heldso",
-        "binds_removed": [],
-        "binds_left": [{"host": "heldso.example.com", "dial": "heldso-app-1:8000"}],
-    }
+def test_app_rm_confirms_and_names_the_site(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    deleted = {"name": "heldso", "hosts": ["heldso.example.com"]}
     monkeypatch.setattr(cli, "_api_try", _rm_api(_RM_PAGE, deleted))
     monkeypatch.setattr(sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": "heldso")
@@ -230,11 +221,9 @@ def test_app_rm_confirms_and_lists_the_binds_left(monkeypatch: pytest.MonkeyPatc
     assert "This deletes the app heldso:" in out
     assert "heldso-app-1" in out
     assert "/srv/yard/apps/heldso/data (1.2GB)" in out
-    assert "These binds stay and will point at nothing:" in out
-    assert "heldso.example.com → heldso-app-1:8000" in out
+    assert "caddy site  heldso.example.com" in out
     assert "removed heldso" in out
-    assert "yard bind rm heldso.example.com" in out
-    assert "yard app rm --with-binds" in out
+    assert "removed the Caddy site: heldso.example.com" in out
 
 
 def test_app_rm_a_wrong_answer_removes_nothing(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
@@ -254,29 +243,22 @@ def test_app_rm_a_wrong_answer_removes_nothing(monkeypatch: pytest.MonkeyPatch, 
     assert [call for call in calls if call[0] == "DELETE"] == []
 
 
-def test_app_rm_yes_with_binds(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
-    deleted = {
-        "name": "heldso",
-        "binds_removed": [{"host": "heldso.example.com", "dial": "heldso-app-1:8000"}],
-        "binds_left": [],
-    }
+def test_app_rm_yes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     calls = []
 
     def fake_api_try(client, method, path, body, timeout=None):
         calls.append((method, path))
-        return 200, json.dumps(deleted)
+        return 200, json.dumps({"name": "heldso", "hosts": []})
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "rm", "--app", "heldso", "--yes", "--with-binds", "--text"])
-    assert calls == [("DELETE", "/api/v1/apps/heldso?binds=1")]
-    out = capsys.readouterr().out
-    assert "removed heldso" in out
-    assert "removed bind heldso.example.com → heldso-app-1:8000" in out
+    main(["app", "rm", "--app", "heldso", "--yes", "--text"])
+    assert calls == [("DELETE", "/api/v1/apps/heldso")]
+    assert capsys.readouterr().out == "removed heldso\n"
 
 
-def test_app_rm_warns_when_the_binds_are_unreadable(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
-    deleted = {"name": "heldso", "binds_removed": [], "binds_left": [], "binds_error": "caddy GET: no socket"}
+def test_app_rm_warns_when_caddy_refuses(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    deleted = {"name": "heldso", "hosts": ["heldso.example.com"], "caddy_error": "caddy POST /load: no socket"}
 
     def fake_api_try(client, method, path, body, timeout=None):
         return 200, json.dumps(deleted)
@@ -285,8 +267,8 @@ def test_app_rm_warns_when_the_binds_are_unreadable(monkeypatch: pytest.MonkeyPa
     _env(monkeypatch)
     main(["app", "rm", "--app", "heldso", "--yes", "--text"])
     out = capsys.readouterr().out
-    assert "Could not read the binds: caddy GET: no socket" in out
-    assert "yard bind ls" in out
+    assert "Caddy did not load the config without the site: caddy POST /load: no socket" in out
+    assert "yard status --full" in out
 
 
 def test_not_logged_in_points_at_login(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
@@ -412,8 +394,8 @@ def test_app_new(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
             return 200, json.dumps(
                 {"app": {"name": body["name"], "repo": body["repo"], "ref": body["ref"], "trigger": "push"}}
             )
-        if path.startswith("/api/v1/binds/"):
-            return 200, json.dumps({"host": "heldso.example.com", "dial": "web-app-1:8000", "state": "absent"})
+        if path == "/api/v1/apps/web/caddy":
+            return 200, json.dumps({"hosts": ["heldso.example.com", "www.heldso.example.com"]})
         if path == "/api/v1/apps/web/deploy":
             return 200, json.dumps(
                 {
@@ -425,7 +407,9 @@ def test_app_new(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     monkeypatch.setattr(
-        cli, "_follow_deploy", lambda *a: {"status": "ok", "image": "localhost/web:abc", "log": "== started\n"}
+        cli,
+        "_follow_deploy",
+        lambda *a: {"status": "ok", "image": "localhost/web:abc", "log": "== started\n", "port": 8080},
     )
     _env(monkeypatch)
 
@@ -440,10 +424,10 @@ def test_app_new(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
             "main",
             "--app",
             "web",
-            "--public",
+            "--caddy",
             "heldso.example.com",
-            "--try",
-            "30s",
+            "--caddy",
+            "www.heldso.example.com",
         ]
     )
     assert seen[0] == (
@@ -451,14 +435,20 @@ def test_app_new(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
         "/api/v1/apps",
         {"name": "web", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"},
     )
-    # A new app deploys right away, and the bind follows it.
+    # A new app deploys right away. The site file follows, with the port the deploy found.
     assert seen[1] == ("POST", "/api/v1/apps/web/deploy", {})
     assert seen[2] == (
         "PUT",
-        "/api/v1/binds/heldso.example.com",
-        {"dial": "web-app-1:8000", "try": "30s"},
+        "/api/v1/apps/web/caddy",
+        b"heldso.example.com, www.heldso.example.com {\n"
+        b"\treverse_proxy web-app-1:8080 {\n"
+        b"\t\tlb_try_duration 10s\n"
+        b"\t\tlb_try_interval 250ms\n"
+        b"\t}\n"
+        b"}\n",
     )
     out = capsys.readouterr().out
+    assert "Saved. Caddy serves heldso.example.com, www.heldso.example.com for web." in out
     assert "https://origin.cursor.com/org/heldso" in out
     assert "Deploying web now…" in out
     assert "ok  localhost/web:abc" in out
@@ -664,51 +654,101 @@ def test_env_commands(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFix
     main(["env", "unset", "A", "--app", "heldso", "--text"])
     assert seen[("PATCH", "/api/v1/apps/heldso/env")] == {"A": None}
 
-    main(["env", "show", "--app", "heldso", "--text"])
+    main(["env", "cat", "--app", "heldso", "--text"])
     out = capsys.readouterr().out
     assert "B=2" in out
 
+    main(["env", "get", "B", "--app", "heldso", "--text"])
+    assert capsys.readouterr().out == "2\n"
+    with pytest.raises(SystemExit):
+        main(["env", "get", "NOPE", "--app", "heldso", "--text"])
+    assert "NOPE is not set for heldso" in capsys.readouterr().err
 
-def test_bind_commands(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
-    seen: dict = {}
+
+def _caddy_api(site: dict, seen: list, refuse: str = ""):
+    """GET and PUT on the site file. A set `refuse` answers each PUT with Caddy's 400."""
 
     def fake_api_try(client, method, path, body, timeout=None):
-        seen[(method, path)] = body
-        if path == "/api/v1/binds" and method == "GET":
-            row = {"host": "heldso.example.com", "dial": "heldso-app:8000", "state": "up"}
-            return 200, json.dumps([row])
-        if path.startswith("/api/v1/binds/") and method == "PUT":
-            saved = {"host": "heldso.example.com", "dial": "heldso-app:9000", "state": "up"}
-            return 200, json.dumps(saved)
-        if path.startswith("/api/v1/binds/") and method == "DELETE":
-            return 200, json.dumps({"host": "heldso.example.com", "dial": "heldso-app:8000"})
-        if path == "/api/v1/apps":
-            return 200, json.dumps([{"name": "heldso", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"}])
-        return 200, json.dumps({"output": "ok\n"})
+        assert path == "/api/v1/apps/heldso/caddy"
+        seen.append((method, body))
+        if method == "GET":
+            # _api_try strips the body, like the real client.
+            return 200, site.get("text", "").strip()
+        if refuse:
+            return 400, json.dumps({"error": {"code": "bad_caddyfile", "message": refuse}})
+        site["text"] = body.decode()
+        return 200, json.dumps({"hosts": ["heldso.example.com"] if site["text"].strip() else []})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    return fake_api_try
+
+
+def test_caddy_cat_and_edit_from_stdin(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    site: dict = {}
+    seen: list = []
+    monkeypatch.setattr(cli, "_api_try", _caddy_api(site, seen))
     _env(monkeypatch)
 
-    main(["bind", "set", "heldso.example.com", "heldso-app:9000", "--try", "30s", "--text"])
-    assert seen[("PUT", "/api/v1/binds/heldso.example.com")] == {
-        "dial": "heldso-app:9000",
-        "try": "30s",
-    }
-    assert "heldso.example.com" in capsys.readouterr().out
+    main(["caddy", "cat", "--app", "heldso", "--text"])
+    assert capsys.readouterr().out == ""
 
-    # No container: the deduced app names <app>-app-1.
-    main(["bind", "set", "heldso.example.com", "--app", "heldso", "--text"])
-    assert seen[("PUT", "/api/v1/binds/heldso.example.com")] == {
-        "dial": "heldso-app-1",
-        "try": "10s",
-    }
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"heldso.example.com {\n}\n")))
+    main(["caddy", "edit", "--app", "heldso", "--text"])
+    assert seen[-1] == ("PUT", b"heldso.example.com {\n}\n")
+    assert capsys.readouterr().out == "Saved. Caddy serves heldso.example.com for heldso.\n"
 
-    main(["bind", "ls", "--text"])
-    assert "heldso.example.com" in capsys.readouterr().out
+    main(["caddy", "cat", "--app", "heldso", "--text"])
+    assert capsys.readouterr().out == "heldso.example.com {\n}\n"
 
-    main(["bind", "rm", "heldso.example.com", "--text"])
-    assert seen[("DELETE", "/api/v1/binds/heldso.example.com")] is None
-    assert "removed heldso.example.com" in capsys.readouterr().out
+
+def test_caddy_edit_in_the_editor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    site: dict = {}
+    seen: list = []
+    monkeypatch.setattr(cli, "_api_try", _caddy_api(site, seen))
+    monkeypatch.setattr(sys, "stdin", _TTY())
+    _env(monkeypatch)
+
+    # An unchanged example saves nothing.
+    monkeypatch.setattr(cli, "_edit_text", lambda text, suffix="": text)
+    main(["caddy", "edit", "--app", "heldso", "--text"])
+    assert capsys.readouterr().out == "No change.\n"
+    assert [method for method, _body in seen] == ["GET"]
+
+    monkeypatch.setattr(cli, "_edit_text", lambda text, suffix="": "heldso.example.com {\n}\n")
+    main(["caddy", "edit", "--app", "heldso", "--text"])
+    assert site["text"] == "heldso.example.com {\n}\n"
+    assert "Saved. Caddy serves heldso.example.com" in capsys.readouterr().out
+
+
+def test_caddy_edit_a_refused_file_opens_the_editor_again(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    seen: list = []
+    edits: list[str] = []
+    monkeypatch.setattr(cli, "_api_try", _caddy_api({}, seen, refuse="heldso.caddy:2: unrecognized directive: x"))
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    def fake_edit(text: str, suffix: str = "") -> str:
+        edits.append(text)
+        return "heldso.example.com {\n\tx\n}\n"
+
+    monkeypatch.setattr(cli, "_edit_text", fake_edit)
+    answers = iter(["", "n"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    _env(monkeypatch)
+    with pytest.raises(SystemExit):
+        main(["caddy", "edit", "--app", "heldso", "--text"])
+    err = capsys.readouterr().err
+    assert "heldso.caddy:2: unrecognized directive: x" in err
+    assert "Not saved. Caddy keeps the site it had." in err
+    # The second editor opens on the refused text, so the change is not lost.
+    assert edits[1] == "heldso.example.com {\n\tx\n}\n"
+    assert [method for method, _body in seen] == ["GET", "PUT", "PUT"]
+
+
+def test_bind_command_is_gone(capsys: pytest.CaptureFixture):
+    with pytest.raises(SystemExit) as caught:
+        main(["bind", "ls"])
+    assert caught.value.code == 2
 
 
 def test_podman_command_is_gone(capsys: pytest.CaptureFixture):
@@ -1717,15 +1757,13 @@ def test_app_new_image(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFi
     assert body["runs"] == "ghcr.io/you/api:1.4"
 
 
-def test_app_new_recipe_public_port(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+def test_app_new_recipe_caddy_port(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     sent = []
 
     def fake_api_try(client, method, path, body, timeout=None):
         sent.append((method, path, body))
         if method == "POST" and path == "/api/v1/apps":
             return 200, json.dumps({"app": {"name": "umami"}})
-        if method == "PUT" and path.startswith("/api/v1/binds/"):
-            return 200, "{}"
         if method == "POST" and path.endswith("/deploy"):
             return 200, json.dumps({"deploy": {"status": "ok", "port": 3000}})
         return 200, "{}"
@@ -1739,13 +1777,14 @@ def test_app_new_recipe_public_port(monkeypatch: pytest.MonkeyPatch, capsys: pyt
             "new",
             "--runs",
             "https://example.com/umami.yml",
-            "--public",
+            "--caddy",
             "umami.example.com",
             "--text",
         ]
     )
-    bind = next(call for call in sent if call[0] == "PUT")
-    assert bind[2]["dial"] == "umami-app-1:3000"
+    site = next(call for call in sent if call[0] == "PUT")
+    assert site[1] == "/api/v1/apps/umami/caddy"
+    assert b"reverse_proxy umami-app-1:3000 {" in site[2]
 
 
 def test_app_set_runs_push_message(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
@@ -1775,168 +1814,75 @@ def test_app_set_runs_manual_message(monkeypatch: pytest.MonkeyPatch, capsys: py
     assert "Deploy now: yard app deploy --app db" in out
 
 
-def _bind_calls(sent):
-    return [call for call in sent if call[0] == "PUT" and call[1].startswith("/api/v1/binds/")]
+def _site_calls(sent):
+    return [call for call in sent if call[0] == "PUT" and call[1].endswith("/caddy")]
 
 
-def test_app_new_binds_the_exposed_port(monkeypatch: pytest.MonkeyPatch):
-    sent = []
-
+def _new_web(monkeypatch: pytest.MonkeyPatch, sent: list, port: int, deploy_code: int = 200) -> None:
     def fake_api_try(client, method, path, body, timeout=None):
         sent.append((method, path, body))
         if path == "/api/v1/apps":
             return 200, json.dumps({"app": {"name": "web"}})
         if path.endswith("/deploy"):
-            return 200, json.dumps({"deploy": {"status": "ok", "port": 3000}})
-        return 200, "{}"
+            if deploy_code >= 300:
+                return deploy_code, json.dumps({"error": {"message": "build failed"}})
+            return 200, json.dumps({"deploy": {"status": "ok", "port": port}})
+        return 200, json.dumps({"hosts": ["web.example.com"]})
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
+    monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": port})
     _env(monkeypatch)
-    monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": 3000})
-    main(
-        [
-            "app",
-            "new",
-            "--text",
-            "--repo",
-            "https://origin.cursor.com/org/web",
-            "--public",
-            "web.example.com",
-        ]
-    )
-    bind = _bind_calls(sent)[0]
-    assert bind[2]["dial"] == "web-app-1:3000"
-    # The bind comes after the deploy.
-    assert sent.index(("POST", "/api/v1/apps/web/deploy", {})) < sent.index(bind)
 
 
-def test_app_new_port_flag_overrides(monkeypatch: pytest.MonkeyPatch):
-    sent = []
-
-    def fake_api_try(client, method, path, body, timeout=None):
-        sent.append((method, path, body))
-        if path == "/api/v1/apps":
-            return 200, json.dumps({"app": {"name": "web"}})
-        if path.endswith("/deploy"):
-            return 200, json.dumps({"deploy": {"status": "ok", "port": 3000}})
-        return 200, "{}"
-
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
-    _env(monkeypatch)
-    monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": 3000})
-    main(
-        [
-            "app",
-            "new",
-            "--text",
-            "--repo",
-            "https://origin.cursor.com/org/web",
-            "--public",
-            "web.example.com",
-            "--port",
-            "9000",
-        ]
-    )
-    assert _bind_calls(sent)[0][2]["dial"] == "web-app-1:9000"
+NEW_WEB = ["app", "new", "--text", "--repo", "https://origin.cursor.com/org/web", "--caddy", "web.example.com"]
 
 
-def test_app_new_repo_app_falls_back_to_8000(monkeypatch: pytest.MonkeyPatch):
-    sent = []
-
-    def fake_api_try(client, method, path, body, timeout=None):
-        sent.append((method, path, body))
-        if path == "/api/v1/apps":
-            return 200, json.dumps({"app": {"name": "web"}})
-        if path.endswith("/deploy"):
-            return 200, json.dumps({"deploy": {"status": "ok", "port": 0}})
-        return 200, "{}"
-
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
-    _env(monkeypatch)
-    monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": 0})
-    main(
-        [
-            "app",
-            "new",
-            "--text",
-            "--repo",
-            "https://origin.cursor.com/org/web",
-            "--public",
-            "web.example.com",
-        ]
-    )
-    assert _bind_calls(sent)[0][2]["dial"] == "web-app-1:8000"
+def test_app_new_caddy_writes_the_exposed_port(monkeypatch: pytest.MonkeyPatch):
+    sent: list = []
+    _new_web(monkeypatch, sent, 3000)
+    main(NEW_WEB)
+    site = _site_calls(sent)[0]
+    assert b"web.example.com {\n\treverse_proxy web-app-1:3000 {" in site[2]
+    # The site file comes after the deploy.
+    assert sent.index(("POST", "/api/v1/apps/web/deploy", {})) < sent.index(site)
 
 
-def test_app_new_repo_less_port_zero_prints_hint(monkeypatch: pytest.MonkeyPatch, capsys):
-    sent = []
-
-    def fake_api_try(client, method, path, body, timeout=None):
-        sent.append((method, path, body))
-        if path == "/api/v1/apps":
-            return 200, json.dumps({"app": {"name": "db"}})
-        if path.endswith("/deploy"):
-            return 200, json.dumps({"deploy": {"status": "ok", "port": 0}})
-        return 200, "{}"
-
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
-    _env(monkeypatch)
-    monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok", "port": 0})
-    main(["app", "new", "--runs", "postgres:17", "--public", "db.example.com", "--text"])
-    assert _bind_calls(sent) == []
-    assert "Bind it: yard bind set db.example.com postgres-app-1:PORT" in capsys.readouterr().out
+def test_app_new_caddy_without_a_port_prints_the_template(monkeypatch: pytest.MonkeyPatch, capsys):
+    sent: list = []
+    _new_web(monkeypatch, sent, 0)
+    with pytest.raises(SystemExit) as caught:
+        main(NEW_WEB)
+    assert caught.value.code == 1
+    assert _site_calls(sent) == []
+    err = capsys.readouterr().err
+    assert "web-app-1 does not expose exactly one port" in err
+    assert "yard caddy edit --app web" in err
+    assert "reverse_proxy web-app-1:PORT {" in err
 
 
-def test_app_new_failed_deploy_binds_8000_for_a_repo_app(monkeypatch: pytest.MonkeyPatch):
-    sent = []
-
-    def fake_api_try(client, method, path, body, timeout=None):
-        sent.append((method, path, body))
-        if path == "/api/v1/apps":
-            return 200, json.dumps({"app": {"name": "web"}})
-        if path.endswith("/deploy"):
-            return 500, json.dumps({"error": {"message": "build failed"}})
-        return 200, "{}"
-
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
-    _env(monkeypatch)
+def test_app_new_caddy_writes_nothing_after_a_failed_deploy(monkeypatch: pytest.MonkeyPatch):
+    sent: list = []
+    _new_web(monkeypatch, sent, 3000, deploy_code=500)
     with pytest.raises(SystemExit):
-        main(
-            [
-                "app",
-                "new",
-                "--text",
-                "--repo",
-                "https://origin.cursor.com/org/web",
-                "--public",
-                "web.example.com",
-            ]
-        )
-    assert _bind_calls(sent)[0][2]["dial"] == "web-app-1:8000"
+        main(NEW_WEB)
+    assert _site_calls(sent) == []
 
 
-def test_app_new_no_deploy_repo_app_binds_8000(monkeypatch: pytest.MonkeyPatch):
-    sent = []
+def test_app_new_caddy_needs_the_first_deploy(monkeypatch: pytest.MonkeyPatch, capsys):
+    sent: list = []
+    _new_web(monkeypatch, sent, 3000)
+    with pytest.raises(SystemExit):
+        main([*NEW_WEB, "--no-deploy"])
+    assert sent == []
+    assert "--caddy needs the first deploy" in capsys.readouterr().err
 
-    def fake_api_try(client, method, path, body, timeout=None):
-        sent.append((method, path, body))
-        return 200, json.dumps({"app": {"name": "web"}})
 
-    monkeypatch.setattr(cli, "_api_try", fake_api_try)
-    _env(monkeypatch)
-    main(
-        [
-            "app",
-            "new",
-            "--text",
-            "--repo",
-            "https://origin.cursor.com/org/web",
-            "--public",
-            "web.example.com",
-            "--no-deploy",
-        ]
-    )
-    assert _bind_calls(sent)[0][2]["dial"] == "web-app-1:8000"
+def test_app_new_caddy_checks_each_host(monkeypatch: pytest.MonkeyPatch):
+    sent: list = []
+    _new_web(monkeypatch, sent, 3000)
+    with pytest.raises(SystemExit):
+        main([*NEW_WEB, "--caddy", "NOT A HOST"])
+    assert sent == []
 
 
 def _new_env_fakes(monkeypatch, sent):
@@ -2015,8 +1961,6 @@ def test_app_new_failed_first_deploy_exits_1(monkeypatch: pytest.MonkeyPatch, ca
         sent.append((method, path, body))
         if path == "/api/v1/apps":
             return 200, json.dumps({"app": {"name": "web"}})
-        if "/binds/" in path:
-            return 200, "{}"
         return 200, json.dumps({"deploy": {"status": "ok"}})
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
@@ -2030,14 +1974,15 @@ def test_app_new_failed_first_deploy_exits_1(monkeypatch: pytest.MonkeyPatch, ca
                 "--text",
                 "--repo",
                 "https://origin.cursor.com/org/web",
-                "--public",
+                "--caddy",
                 "web.example.com",
             ]
         )
     assert caught.value.code == 1
-    # The bind still went in so Caddy is ready after the fix.
-    assert _bind_calls(sent)[0][2]["dial"] == "web-app-1:8000"
-    assert "web was created, but the first deploy failed." in capsys.readouterr().err
+    assert _site_calls(sent) == []
+    captured = capsys.readouterr()
+    assert "web was created, but the first deploy failed." in captured.err
+    assert "yard caddy edit --app web" in captured.out
 
 
 def test_app_new_env_put_failure_dies_cleanly(monkeypatch: pytest.MonkeyPatch, capsys):

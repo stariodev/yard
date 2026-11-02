@@ -85,12 +85,10 @@ def _yard(
     return yard
 
 
-def _route(host: str, dial: str) -> dict:
-    return {
-        "@id": f"yard-{host}",
-        "match": [{"host": [host]}],
-        "handle": [{"upstreams": [{"dial": dial}]}],
-    }
+def _site(yard: Yard, name: str, host: str) -> None:
+    path = yard.config.site(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{host} {{\n\treverse_proxy {name}-app-1:8000\n}}\n")
 
 
 def _run(yard: Yard) -> dict[str, dict]:
@@ -107,7 +105,7 @@ def test_doctor_all_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert found["apply image"]["ok"]
     assert found["caddy"]["detail"] == "running"
     assert found["caddy admin"]["detail"] == "ok"
-    assert found["caddy routes"]["detail"] == "0 routes"
+    assert found["caddy config"]["detail"] == "0 site files · 0 hosts"
     assert found["podman journald"]["detail"] == "logs journald · events journald"
     assert found["journal"]["ok"]
     assert found["container logs"]["detail"] == "1 containers"
@@ -209,7 +207,7 @@ def test_doctor_skips_the_proxy_checks_without_a_host(tmp_path: Path):
     found = _run(yard)
     assert "caddy" not in found
     assert "caddy admin" not in found
-    assert "caddy routes" not in found
+    assert "caddy config" not in found
     assert not any(name.startswith("dns ") for name in found)
 
 
@@ -246,20 +244,19 @@ def test_doctor_flags_a_dead_admin_socket(tmp_path: Path, monkeypatch: pytest.Mo
         def __init__(self) -> None:
             pass
 
-        async def request(self, method: str, path: str, body=None):
+        async def request(self, method: str, path: str, body=None, content_type: str = "application/json"):
             raise YardError(502, "caddy", "caddy GET /config/: no socket")
 
     yard.caddy = _Down()
     found = _run(yard)
     assert found["caddy admin"]["ok"] is False
-    assert found["caddy routes"]["ok"] is False
+    assert found["caddy config"]["ok"] is False
 
 
 def test_doctor_routes_and_certificates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    routes = [_route("heldso.example.com", "heldso:8000")]
-    yard.caddy = FakeCaddy(routes)
+    _site(yard, "heldso", "heldso.example.com")
     monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda host, port: [(0, 0, 0, "", ("10.0.0.1", 443))])
 
     def refused(addr, timeout=0):
@@ -267,7 +264,7 @@ def test_doctor_routes_and_certificates(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(doctor.socket, "create_connection", refused)
     found = _run(yard)
-    assert found["caddy routes"]["detail"] == "1 routes"
+    assert found["caddy config"]["ok"]
     assert found["dns heldso.example.com"]["detail"] == "10.0.0.1"
     assert found["certificate heldso.example.com"]["detail"] == "not issued yet; check dns, then yard logs yard-caddy-1"
     assert not found["certificate heldso.example.com"]["ok"]
@@ -286,11 +283,10 @@ def test_doctor_routes_and_certificates(tmp_path: Path, monkeypatch: pytest.Monk
     found = _run(yard)
     assert found["certificate heldso.example.com"]["detail"] == "issued 15d ago"
 
-    # A removed route leaves the count at zero. The host checks stop with it.
-    routes.clear()
+    # A removed site file stops the host checks.
+    yard.config.site("heldso").unlink()
     found = _run(yard)
-    assert found["caddy routes"]["ok"]
-    assert found["caddy routes"]["detail"] == "0 routes"
+    assert found["caddy config"]["ok"]
     assert "dns heldso.example.com" not in found
 
 
@@ -298,12 +294,8 @@ def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
     yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    yard.caddy = FakeCaddy(
-        [
-            _route("yard.example.com", "yard:8000"),
-            _route("heldso.example.com", "heldso:8000"),
-        ]
-    )
+    _site(yard, "yard", "yard.example.com")
+    _site(yard, "heldso", "heldso.example.com")
     monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda host, port: [(0, 0, 0, "", ("10.0.0.1", 443))])
     sent: list[bytes] = []
 
@@ -338,7 +330,7 @@ def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_doctor_https_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    yard.caddy = FakeCaddy([_route("heldso.example.com", "heldso:8000")])
+    _site(yard, "heldso", "heldso.example.com")
     monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda host, port: [(0, 0, 0, "", ("10.0.0.1", 443))])
 
     def refused(addr, timeout=0):

@@ -2,6 +2,13 @@
 
 ## 0.11.0
 
+- Caddy reads Caddyfiles. Each app has one site file on Yard, `apps/yard/caddy/sites/<name>.caddy`. `yard caddy cat` prints it, and `yard caddy edit` opens it in `$EDITOR` or reads it from stdin. Yard loads Caddy after each save. Caddy checks the whole config first; a refused file keeps the old config, and the error names the file and the line. An empty file removes the site. A refused edit in the editor opens the editor again on the same text.
+- `yard app new --caddy HOST` writes the default site after the first deploy: every host, comma-separated, to `<name>-app-1` on the port the container exposes. `--caddy` repeats. Without one exposed port, it prints the template and writes nothing. `--caddy` with `--no-deploy` is refused.
+- New routes: `GET /api/v1/apps/{name}/caddy` answers the site file as text (empty when there is none), and `PUT` takes the whole file as the body and answers `{"hosts"}`. A refused file is a 400 `bad_caddyfile` with Caddy's error.
+- Breaking: the binds are gone. `yard bind ls/set/rm`, `/api/v1/binds`, `yard app new --public/--try/--port`, and `yard app rm --with-binds` are removed. `yard app rm` removes the site file first, and its answer is `{"name", "hosts"}`.
+- Breaking: Caddy starts from `ops/Caddyfile` with no `--resume`; `ops/caddy.json` is gone. The site files are the only state. See the upgrade steps in the pull request that made this change.
+- `yard env show` is `yard env cat`. New `yard env get KEY` prints one value.
+- The status table's `bind` column is `host`, and the app page has a `caddy` line. Both list the hosts from the site file. `yard status --full` has a `caddy config` row in place of `caddy routes`: Caddy adapts every site file on disk and loads nothing.
 - `yard repo new [NAME] [--owner] [--forge]` creates a private repo for the checkout, adds it as `origin`, and pushes the branch with your own git credentials. It needs a commit and no `origin` remote. It never runs `git add` or `git commit`.
 - New route `POST /api/v1/repos` takes `{"name", "owner?", "forge?"}` and answers `{"repo"}`. The server picks the one connected forge and its one installation; with more than one it answers 400 `forge_required` or `owner_required`.
 - Repo creation needs an installation on all repositories, on GitHub and on Origin: a "selected" installation cannot see the repo it makes. A separate account for generated apps keeps your other repos out of that installation.

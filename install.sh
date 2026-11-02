@@ -63,8 +63,8 @@ if ! command -v nft >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1 || ! co
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   # uidmap gives rootless Podman newuidmap/newgidmap; acl gives setfacl for the
-  # traverse check; podman is the Ubuntu 26.04 package; curl writes the bind
-  # for --domain through the local API.
+  # traverse check; podman is the Ubuntu 26.04 package; curl writes the Caddy
+  # site for --domain through the local API.
   apt-get install -y nftables git ca-certificates sudo iproute2 procps uidmap acl podman curl
 fi
 command -v nft >/dev/null 2>&1 || die "nft is not installed" "Hint: apt-get install -y nftables"
@@ -129,6 +129,7 @@ ensure_dir "$root/apps/yard/caddy"
 ensure_dir "$root/apps/yard/caddy/config"
 ensure_dir "$root/apps/yard/caddy/data"
 ensure_dir "$root/apps/yard/caddy/run"
+ensure_dir "$root/apps/yard/caddy/sites"
 install -d -o yard -g yard -m 700 "$root/apps/yard"
 
 install -d /etc/yard
@@ -355,21 +356,26 @@ done
 token="$(cat "$root/tokens/admin.token")"
 echo "token: $token"
 if [ -n "$domain" ]; then
-  # --domain publishes Yard's own host: one bind through the local API.
+  # --domain publishes Yard's own host: Yard's site file, written through the local API.
   # Caddy's admin socket can lag the token file, so the PUT retries.
-  bind_url="http://127.0.0.1:${public_port}/api/v1/binds/${domain}"
-  if ! retry 30 sh -c "curl -fsS -X PUT -H 'Authorization: Bearer $token' -H 'Content-Type: application/json' -d '{\"dial\":\"yard-app-1\"}' '$bind_url' >/dev/null 2>&1"; then
-    out="$(curl -sS -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d '{"dial":"yard-app-1"}' "$bind_url" 2>&1 || true)"
-    die "Could not create the bind for ${domain}." \
-      "Yard answers locally, but writing the Caddy route failed." \
-      "Hint: yard bind set ${domain} yard-app-1" \
-      "Context: PUT ${bind_url} answered: ${out:-no output}"
+  site="$(printf '%s {\n\treverse_proxy yard-app-1:8000 {\n\t\tlb_try_duration 10s\n\t\tlb_try_interval 250ms\n\t}\n}\n' "$domain")"
+  site_url="http://127.0.0.1:${public_port}/api/v1/apps/yard/caddy"
+  put_site() {
+    printf '%s\n' "$site" | curl -fsS -X PUT -H "Authorization: Bearer $token" \
+      -H 'Content-Type: text/caddyfile' --data-binary @- "$site_url"
+  }
+  if ! retry 30 put_site >/dev/null 2>&1; then
+    out="$(put_site 2>&1 || true)"
+    die "Could not write the Caddy site for ${domain}." \
+      "Yard answers locally, but Caddy did not load the site file." \
+      "Hint: yard caddy edit --app yard" \
+      "Context: PUT ${site_url} answered: ${out:-no output}"
   fi
-  echo "bind: https://$domain -> yard-app-1"
-  # The bind is written; the certificate and DNS can still lag. Warn, not fail.
+  echo "caddy: https://$domain -> yard-app-1:8000"
+  # The site is loaded; the certificate and DNS can still lag. Warn, not fail.
   if ! retry 10 sh -c "curl -fsS -o /dev/null --max-time 5 'https://${domain}/health'"; then
     echo "warning: https://${domain}/health did not answer yet." >&2
-    echo "  The bind is written. Caddy still needs DNS and a certificate." >&2
+    echo "  The site file is loaded. Caddy still needs DNS and a certificate." >&2
     echo "  Check: curl -I https://${domain}/health" >&2
   fi
   echo "url: https://$domain"
