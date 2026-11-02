@@ -7,10 +7,10 @@ import secrets
 import shutil
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from app.server import compose, detect, git, journal, podman, sites, sources
+from app.server import compose, detect, git, journal, podman, sites, sources, status
 from app.server.detect import Plan
 from app.server.forges import Forge
 from app.server.store import App, Config, Deployed, read_deployed, write_deployed
@@ -204,6 +204,10 @@ async def _deploy_body(yard: Yard, job: Job) -> Outcome:
         if yard.config.skip_deploy:
             job.push("YARD_SKIP_DEPLOY is set. Deploy did not run.")
             return Outcome("skipped")
+        if app.name == "yard" and await _self_deploy_running(yard):
+            # `podman run --replace` would kill that apply mid-build. The next Yard process checks the tip again.
+            job.push("== a yard deploy is still running. This deploy did not run.")
+            return Outcome("skipped", error="a yard deploy is still running")
         ready = Ready(revision="")
         try:
             if app.repo:
@@ -216,7 +220,7 @@ async def _deploy_body(yard: Yard, job: Job) -> Outcome:
             job.push(f"!! {exc}")
             outcome = Outcome("failed", ready.image, str(exc))
             await compose.record_failure(yard.config, app.name, _labels(job, ready, outcome), job.lines)
-            _deploy_end(yard, app, ready.revision, outcome)
+            _deploy_end(yard, app.name, ready.revision, outcome)
             return outcome
         return await _apply(yard, app, job, ready)
 
@@ -345,7 +349,7 @@ async def _apply(yard: Yard, app: App, job: Job, ready: Ready) -> Outcome:
         outcome = Outcome("failed", ready.image, f"apply exited {code}", previous)
     else:
         outcome = Outcome("ok", ready.image, previous=previous)
-    _deploy_end(yard, app, ready.revision, outcome)
+    _deploy_end(yard, app.name, ready.revision, outcome)
     if outcome.status == "ok":
         write_deployed(config, app.name, ready.deployed)
         if ready.deployed.kind == "compose" and not app.repo:
@@ -355,10 +359,15 @@ async def _apply(yard: Yard, app: App, job: Job, ready: Ready) -> Outcome:
 
 
 def _labels(job: Job, ready: Ready, outcome: Outcome) -> dict[str, str]:
-    """The deploy container's labels: what `status.deploy_record` reads back."""
+    """The deploy container's labels: what `status.deploy_record` and `settle` read back."""
+    plan = ready.deployed or Deployed()
     labels = {
         "sha": ready.revision,
         "image": ready.image,
+        "runs": plan.runs,
+        "kind": plan.kind,
+        "reason": plan.reason,
+        "template": plan.template,
         "cause": job.cause,
         "actor": job.actor,
         "previous": outcome.previous,
@@ -386,20 +395,90 @@ async def exposed_port(yard: Yard, name: str) -> int:
         return 0
 
 
-def _deploy_end(yard: Yard, app: App, sha: str, outcome: Outcome) -> None:
+def _deploy_end(yard: Yard, name: str, sha: str, outcome: Outcome) -> None:
     journal.send(
         yard.config,
         "deploy.end",
-        f"deploy {app.name} {outcome.status}",
+        f"deploy {name} {outcome.status}",
         priority=3 if outcome.status in {"failed", "reverted"} else 6,
-        app=app.name,
+        app=name,
         sha=sha,
         image=outcome.image,
         status=outcome.status,
         previous=outcome.previous,
-        container=deploy_container(app.name),
+        container=deploy_container(name),
         error=(outcome.error.splitlines() or [""])[0],
     )
+
+
+async def settle(yard: Yard) -> None:
+    """Finish the deploys that a replaced Yard process left. Runs once at boot.
+
+    A yard self-deploy swaps yard-app-1 while another app's apply container keeps
+    running. The old process dies before it writes `deployed` and `deploy.end`;
+    the deploy container still holds the record.
+    """
+    try:
+        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    except YardError as exc:
+        log.warning("settle: %s", exc)
+        return
+    names = [app.name for app in yard.store.list_apps() if deploy_container(app.name) in listed]
+    await asyncio.gather(*(_settle(yard, name, listed) for name in names))
+
+
+async def _settle(yard: Yard, name: str, listed: dict[str, podman.Container]) -> None:
+    """A running record lost its process: wait for it, then send its deploy.end.
+    An ok record with a new sha lost its `deployed` write: write it from the labels."""
+    async with yard.lock(name):
+        record = status.deploy_record(listed, name)
+        waited = record is not None and record["status"] == "running"
+        if waited:
+            try:
+                await yard.podman.run("wait", deploy_container(name), timeout=None)
+                listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+            except YardError as exc:
+                log.warning("settle %s: %s", name, exc)
+                return
+            record = status.deploy_record(listed, name)
+        if record is None or record["status"] == "running":
+            return
+        deployed = read_deployed(yard.config, name)
+        # ensure_host owns the yard row: the running process is its revision.
+        stale = (
+            name != "yard"
+            and record["status"] == "ok"
+            and bool(record["sha"])
+            and (deployed is None or deployed.revision != record["sha"])
+        )
+        if stale:
+            write_deployed(yard.config, name, _record_deployed(listed[deploy_container(name)].labels, deployed))
+        if waited or stale:
+            outcome = Outcome(record["status"], record["image"], record["error"], record["previous"])
+            _deploy_end(yard, name, record["sha"], outcome)
+
+
+def _record_deployed(labels: dict[str, str], old: Deployed | None) -> Deployed:
+    """The deployed row from the record's labels. A 0.11.0 record has no plan labels: keep the old plan."""
+    if labels.get("kind"):
+        return Deployed(
+            revision=labels["sha"],
+            runs=labels.get("runs", ""),
+            kind=labels["kind"],
+            reason=labels.get("reason", ""),
+            template=labels.get("template", ""),
+        )
+    return replace(old or Deployed(), revision=labels["sha"])
+
+
+async def _self_deploy_running(yard: Yard) -> bool:
+    """True while the detached apply container of a yard self-deploy runs."""
+    try:
+        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    except YardError:
+        return False
+    item = listed.get(deploy_container("yard"))
+    return item is not None and item.running
 
 
 def _set_tried(yard: Yard, name: str, revision: str, template: str) -> Tip:

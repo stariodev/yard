@@ -14,7 +14,7 @@ import pytest
 from app.server import apps, compose, git, journal, sources
 from app.server.forges import Forge, GitHub, Origin
 from app.server.podman import Podman
-from app.server.store import Config, Deployed, Store, read_deployed
+from app.server.store import Config, Deployed, Store, read_deployed, write_deployed
 from app.server.yard import Yard
 from app.shared import YardError
 from tests.server.conftest import FakeCaddy, make_yard
@@ -96,6 +96,9 @@ async def test_deploy_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert recorder.calls[0]["labels"] == {
         "sha": sha,
         "image": outcome.image,
+        "runs": "Containerfile",
+        "kind": "containerfile",
+        "reason": "found Containerfile",
         "cause": "push",
         "actor": "webhook:origin",
     }
@@ -1065,3 +1068,111 @@ async def test_a_very_long_apply_line_still_deploys(tmp_path: Path, monkeypatch:
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "ok"
     assert long_line in yard.deploys["heldso"].lines
+
+
+def _record(name: str, sha: str, *, state: str = "exited", code: int = 0, **labels: str) -> dict:
+    """One deploy container in `podman ps -a` JSON."""
+    given = {"yard.sha": sha, "yard.image": f"localhost/{name}:{sha}", **{f"yard.{k}": v for k, v in labels.items()}}
+    return {"Names": [f"deploy-{name}"], "State": state, "ExitCode": code, "Labels": given}
+
+
+class _SettlePodman(Podman):
+    """Each ps answers the next list; `wait` is recorded."""
+
+    def __init__(self, *answers: list[dict]) -> None:
+        super().__init__("podman", False)
+        self.answers = [json.dumps(answer) for answer in answers]
+        self.waited: list[str] = []
+
+    async def run(self, *args: str, timeout=None) -> str:
+        if args[:1] == ("ps",):
+            return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if args[:1] == ("wait",):
+            self.waited.append(args[1])
+            return "0"
+        return "[]"
+
+
+def _settle_yard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *answers: list[dict]):
+    yard = make_yard(tmp_path, skip=False)
+    yard.store.create_app("stario-site", "https://github.com/org/stario-site", "main", "push")
+    write_deployed(yard.config, "stario-site", Deployed(revision="f5f6ab3", runs="yard:stario", kind="containerfile"))
+    yard.podman = _SettlePodman(*answers)
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(journal, "send", lambda _c, event, _m, **kw: sent.append((event, kw)))
+    return yard, sent
+
+
+async def test_settle_writes_the_rev_a_replaced_yard_left(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Yard swapped itself while stario-site deployed b3550ab: the record says ok, `deployed` kept f5f6ab3."""
+    record = _record("stario-site", "b3550ab", runs="yard:stario", kind="containerfile", template="t2")
+    yard, sent = _settle_yard(tmp_path, monkeypatch, [record])
+    await apps.settle(yard)
+    assert read_deployed(yard.config, "stario-site") == Deployed(
+        revision="b3550ab", runs="yard:stario", kind="containerfile", template="t2"
+    )
+    end = next(kw for event, kw in sent if event == "deploy.end")
+    assert end["status"] == "ok" and end["sha"] == "b3550ab" and end["container"] == "deploy-stario-site"
+
+    # The check loop sees the tip deployed and does not deploy it again.
+    async def no_deploy(*args, **kw):
+        raise AssertionError("deployed the same revision again")
+
+    monkeypatch.setattr(apps, "deploy", no_deploy)
+    monkeypatch.setattr(git, "remote_tip", lambda *a, **kw: asyncio.sleep(0, "b3550ab"))
+    monkeypatch.setattr(apps, "_template_at", lambda clone, app: "t2")
+    await apps._check(yard, yard.store.app("stario-site"), cause="check", actor="check")
+
+
+async def test_settle_keeps_the_plan_of_a_record_without_plan_labels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    yard, _sent = _settle_yard(tmp_path, monkeypatch, [_record("stario-site", "b3550ab")])
+    await apps.settle(yard)
+    assert read_deployed(yard.config, "stario-site") == Deployed(
+        revision="b3550ab", runs="yard:stario", kind="containerfile"
+    )
+
+
+async def test_settle_waits_for_a_running_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    running = _record("stario-site", "b3550ab", state="running", kind="containerfile")
+    failed = _record("stario-site", "b3550ab", code=1, kind="containerfile")
+    yard, sent = _settle_yard(tmp_path, monkeypatch, [running], [failed])
+    podman = yard.podman
+    assert isinstance(podman, _SettlePodman)
+    await apps.settle(yard)
+    assert podman.waited == ["deploy-stario-site"]
+    end = next(kw for event, kw in sent if event == "deploy.end")
+    assert end["status"] == "failed" and end["error"] == "apply exited 1"
+    assert read_deployed(yard.config, "stario-site") == Deployed(
+        revision="f5f6ab3", runs="yard:stario", kind="containerfile"
+    )
+
+
+async def test_settle_leaves_a_settled_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    yard, sent = _settle_yard(tmp_path, monkeypatch, [_record("stario-site", "f5f6ab3", kind="containerfile")])
+    await apps.settle(yard)
+    assert not sent
+
+
+async def test_settle_leaves_the_yard_row_to_ensure_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    yard, sent = _settle_yard(
+        tmp_path, monkeypatch, [_record("yard", "new", state="running")], [_record("yard", "new")]
+    )
+    yard.store.create_app("yard", "https://github.com/org/yard")
+    write_deployed(yard.config, "yard", Deployed(revision="boot"))
+    await apps.settle(yard)
+    assert read_deployed(yard.config, "yard") == Deployed(revision="boot")
+    assert [kw["status"] for event, kw in sent if event == "deploy.end"] == ["ok"]
+
+
+async def test_a_yard_deploy_waits_for_a_running_self_deploy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`podman run --replace` would kill the running apply. The deploy skips before the clone moves."""
+    yard, recorder = _deploy_github(tmp_path, monkeypatch, name="yard")
+    yard.podman = _SettlePodman([_record("yard", "old", state="running")])
+
+    async def no_sync(*args, **kw):
+        raise AssertionError("synced the clone under a running build")
+
+    monkeypatch.setattr(git, "sync", no_sync)
+    outcome = await apps.deploy(yard, "yard")
+    assert outcome.status == "skipped" and "still running" in outcome.error
+    assert not recorder.calls
