@@ -499,7 +499,8 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
         if hosts:
             print(f"Caddy has no site for {name} yet. After a good deploy, run: yard caddy edit --app {name}")
         _die(f"{name} was created, but the first deploy failed.")
-    _write_default_site(session, name, hosts, int(note.get("port") or 0))
+    # A repo app listens on 8000 (the templates set it). An image or a URL app must expose one port.
+    _write_default_site(session, name, hosts, int(note.get("port") or 0) or (0 if repo_less else 8000))
 
 
 def _new_app_env(args: argparse.Namespace, name: str) -> dict[str, str]:

@@ -3,7 +3,7 @@
 ## 0.11.0
 
 - Caddy reads Caddyfiles. Each app has one site file on Yard, `apps/yard/caddy/config/sites/<name>.caddy`. `yard caddy cat` prints it, and `yard caddy edit` opens it in `$EDITOR` or reads it from stdin. Yard loads Caddy after each save. Caddy checks the whole config first; a refused file keeps the old config, and the error names the file and the line. An empty file removes the site. A refused edit in the editor opens the editor again on the same text.
-- `yard app new --caddy HOST` writes the default site after the first deploy: every host, comma-separated, to `<name>-app-1` on the port the container exposes. `--caddy` repeats. Without one exposed port, it prints the template and writes nothing. `--caddy` with `--no-deploy` is refused.
+- `yard app new --caddy HOST` writes the default site after the first deploy: every host, comma-separated, to `<name>-app-1` on the port the container exposes, else 8000 for an app with a repo. `--caddy` repeats. An image or URL app without one exposed port gets the template printed and no file. `--caddy` with `--no-deploy` is refused.
 - New routes: `GET /api/v1/apps/{name}/caddy` answers the site file as text (empty when there is none), and `PUT` takes the whole file as the body and answers `{"hosts"}`. A refused file is a 400 `bad_caddyfile` with Caddy's error.
 - Breaking: the binds are gone. `yard bind ls/set/rm`, `/api/v1/binds`, `yard app new --public/--try/--port`, and `yard app rm --with-binds` are removed. `yard app rm` removes the site file first, and its answer is `{"name", "hosts"}`.
 - Caddy starts from `ops/Caddyfile`; `ops/caddy.json` is gone. Caddy keeps `--resume`, and Yard loads the site files at every boot, so they are the state.

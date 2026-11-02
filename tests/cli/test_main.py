@@ -1847,11 +1847,19 @@ def test_app_new_caddy_writes_the_exposed_port(monkeypatch: pytest.MonkeyPatch):
     assert sent.index(("POST", "/api/v1/apps/web/deploy", {})) < sent.index(site)
 
 
-def test_app_new_caddy_without_a_port_prints_the_template(monkeypatch: pytest.MonkeyPatch, capsys):
+def test_app_new_caddy_repo_app_falls_back_to_8000(monkeypatch: pytest.MonkeyPatch):
+    # The Yard templates have no EXPOSE line: a repo app gets 8000.
+    sent: list = []
+    _new_web(monkeypatch, sent, 0)
+    main(NEW_WEB)
+    assert b"reverse_proxy web-app-1:8000 {" in _site_calls(sent)[0][2]
+
+
+def test_app_new_caddy_image_without_a_port_prints_the_template(monkeypatch: pytest.MonkeyPatch, capsys):
     sent: list = []
     _new_web(monkeypatch, sent, 0)
     with pytest.raises(SystemExit) as caught:
-        main(NEW_WEB)
+        main(["app", "new", "--text", "--runs", "postgres:17", "--app", "web", "--caddy", "web.example.com"])
     assert caught.value.code == 1
     assert _site_calls(sent) == []
     err = capsys.readouterr().err
