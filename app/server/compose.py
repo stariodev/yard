@@ -35,6 +35,17 @@ class Project:
     name: str
     files: list[str]
     env: dict[str, str]
+    image: str = ""
+
+
+def plan_image(app: App, plan: Deployed) -> str:
+    """The image a plan runs: a local tag for a repo app, the pinned digest for an image app,
+    and a compose:<12 hex> name for a compose file from a URL."""
+    if app.repo:
+        return image_tag(app.name, plan.revision, plan.template)
+    if plan.kind == "image":
+        return f"{plan.runs.split('@', 1)[0]}@{plan.revision}"
+    return f"compose:{plan.revision[7:19]}"
 
 
 def run_env(config: Config, app: App, checkout: Path, image: str, sha: str) -> dict[str, str]:
@@ -58,56 +69,41 @@ def run_env(config: Config, app: App, checkout: Path, image: str, sha: str) -> d
     return env
 
 
-def project(
-    config: Config,
-    app: App,
-    kind: str,
-    runs: str,
-    revision: str,
-    image: str,
-    checkout: Path,
-    dockerfile: str = "",
-) -> Project:
-    """The project a deploy or purge runs.
+def project(config: Config, app: App, plan: Deployed) -> Project:
+    """The project a deploy or purge runs, with the image it runs.
 
     kind "containerfile" composes Yard's app+build files; "image" composes app
     only; "compose" runs the file itself: the clone path or the fetched copy.
     """
-    env = run_env(config, app, checkout, image, revision)
+    checkout = config.clone(app.name) if app.repo else config.app_dir(app.name)
+    image = plan_image(app, plan)
+    env = run_env(config, app, checkout, image, plan.revision)
     ensure_file(config.env(app.name))
-    if kind == "containerfile":
+    if plan.kind == "containerfile":
         files = [APP_COMPOSE, BUILD_COMPOSE]
-        env["DOCKERFILE"] = dockerfile
+        # A written Containerfile lives beside the clone; a repo one is a path in it.
+        written = plan.runs.startswith("yard:")
+        env["DOCKERFILE"] = str(config.app_dir(app.name) / "Containerfile") if written else plan.runs
         env["YARD_FILES"] = "1"
-    elif kind == "image":
+    elif plan.kind == "image":
         files = [APP_COMPOSE]
         env["YARD_FILES"] = "1"
-    elif runs.startswith("https://"):
-        files = [str(config.compose_copy(app.name, revision))]
+    elif not app.repo:
+        files = [str(config.compose_copy(app.name, plan.revision))]
     else:
-        files = [str(checkout / runs)]
-    return Project(app.name, files, env)
+        files = [str(checkout / plan.runs)]
+    return Project(app.name, files, env, image)
 
 
-def saved_project(config: Config, app: App, deployed: Deployed | None) -> Project | None:
-    """Rebuild the project for a purge from the running plan; None when there is none."""
-    if deployed is None or not deployed.revision:
+def saved_project(config: Config, app: App, plan: Deployed | None) -> Project | None:
+    """The project for a purge from the running plan; None when its files are gone."""
+    if plan is None or not plan.revision:
         return None
-    if deployed.kind == "image":
-        image = f"{deployed.runs.split('@', 1)[0]}@{deployed.revision}"
-        return project(config, app, "image", "", deployed.revision, image, config.app_dir(app.name))
-    if deployed.kind == "compose" and deployed.runs.startswith("https://"):
-        copy = config.compose_copy(app.name, deployed.revision)
-        if not copy.is_file():
-            return None
-        image = f"compose:{deployed.revision[7:19]}"
-        return project(config, app, "compose", deployed.runs, deployed.revision, image, config.app_dir(app.name))
-    checkout = config.clone(app.name)
-    if not (checkout / ".git").exists():
+    if app.repo and not (config.clone(app.name) / ".git").exists():
         return None
-    image = image_tag(app.name, deployed.revision, deployed.template)
-    dockerfile = str(config.app_dir(app.name) / "Containerfile") if deployed.runs.startswith("yard:") else deployed.runs
-    return project(config, app, deployed.kind, deployed.runs, deployed.revision, image, checkout, dockerfile)
+    if not app.repo and plan.kind == "compose" and not config.compose_copy(app.name, plan.revision).is_file():
+        return None
+    return project(config, app, plan)
 
 
 async def apply(

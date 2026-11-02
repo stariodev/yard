@@ -104,7 +104,7 @@ def page_json(page: status.Page) -> dict[str, Any]:
         "dir": page.dir,
         "rows": [asdict(row) for row in page.rows],
         "hosts": page.hosts,
-        "deploy": page.deploy,
+        "deploy": asdict(page.deploy) if page.deploy else None,
         "log": page.log,
         "template_moved": page.template_moved,
     }
@@ -866,9 +866,10 @@ class AppsPage:
             # No deploy runs: the deploy container is the record. A skipped deploy has none.
             record = await status.last_deploy(self.yard, name)
             if record is not None:
-                if record["status"] == "ok":
-                    record["port"] = await apps.exposed_port(self.yard, name)
-                w.json(cast(JsonValue, {"deploy": record}))
+                body = asdict(record)
+                if record.status == "ok":
+                    body["port"] = await apps.exposed_port(self.yard, name)
+                w.json(cast(JsonValue, {"deploy": body}))
                 return
             if job is None:
                 raise YardError(404, "not_found", f"{name} has no deploy yet", context={"app": name})

@@ -210,9 +210,9 @@ async def _join(yard: Yard, job: Job) -> Outcome:
     job.push(f"== {deploy_container(job.app)} is running. This deploy follows it.")
     await compose.follow(yard.config, job.app, job.push)
     record = await status.last_deploy(yard, job.app)
-    if record is None or record["status"] == "running":
+    if record is None or record.status == "running":
         return Outcome("failed", error=f"lost {deploy_container(job.app)} while it ran", joined=True)
-    return Outcome(record["status"], record["image"], record["error"], record["previous"], joined=True)
+    return Outcome(record.status, record.image, record.error, record.previous, joined=True)
 
 
 @dataclass(slots=True)
@@ -241,24 +241,19 @@ async def _ready_repo(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
     # Label the tried pair before the plan can fail, or the check loop retries every round.
     ready.deployed = Deployed(revision=ready.revision, template=_template_at(checkout, app))
     plan = _plan(yard, app, ready.before)
-    ready.image = compose.image_tag(app.name, ready.revision, plan.template)
-    dockerfile = ""
-    if plan.kind == "containerfile":
-        dockerfile = str(config.app_dir(app.name) / "Containerfile") if plan.answer.startswith("yard:") else plan.answer
+    ready.deployed = Deployed(
+        revision=ready.revision, runs=plan.answer, kind=plan.kind, reason=plan.reason, template=plan.template
+    )
     try:
-        project = compose.project(
-            config, app, plan.kind, plan.answer, ready.revision, ready.image, checkout, dockerfile
-        )
+        project = compose.project(config, app, ready.deployed)
     except OSError as exc:
         raise YardError(502, "compose", str(exc)) from exc
+    ready.image = project.image
     job.push(f"== runs {plan.answer} ({plan.kind}" + (f"; {plan.reason}" if plan.reason else "") + ")")
     # A deploy of a sha whose image is still local skips the build.
     if await _image_exists(yard, ready.image):
         project.env["SKIP_BUILD"] = "1"
     ready.project = project
-    ready.deployed = Deployed(
-        revision=ready.revision, runs=plan.answer, kind=plan.kind, reason=plan.reason, template=plan.template
-    )
     return ready
 
 
@@ -273,12 +268,13 @@ async def _ready_source(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
     previous_copy = None
     if kind == "image":
         ready.revision = await sources.digest(app.runs)
-        ready.deployed = Deployed(revision=ready.revision)
-        ready.image = f"{app.runs.split('@', 1)[0]}@{ready.revision}"
+        ready.deployed = Deployed(revision=ready.revision, runs=app.runs, kind="image")
+        ready.image = compose.plan_image(app, ready.deployed)
     else:
         body = await sources.fetch_file(app.runs)
         ready.revision = "sha256:" + hashlib.sha256(body).hexdigest()
-        ready.deployed = Deployed(revision=ready.revision)
+        ready.deployed = Deployed(revision=ready.revision, runs=app.runs, kind="compose")
+        ready.image = compose.plan_image(app, ready.deployed)
         text = body.decode("utf-8", "replace")
         if detect.classify(text) != "compose":
             raise YardError(502, "detect", "a Containerfile needs a repo to build; a URL can name a compose file")
@@ -289,8 +285,6 @@ async def _ready_source(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
                 "a compose file from a URL cannot build: there is no checkout",
                 help_text="Build the image elsewhere, or give the app a repo.",
             )
-        kind = "compose"
-        ready.image = f"compose:{ready.revision[7:19]}"
         ready.revert_image = False
         if ready.before.revision:
             previous_copy = config.compose_copy(app.name, ready.before.revision)
@@ -301,12 +295,11 @@ async def _ready_source(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
         for path in copy.parent.glob("*.yml"):
             if path not in (copy, previous_copy):
                 path.unlink()
-    project = compose.project(config, app, kind, app.runs, ready.revision, ready.image, config.app_dir(app.name))
+    project = compose.project(config, app, ready.deployed)
     project.env["SKIP_BUILD"] = "1"
     if previous_copy is not None and previous_copy.is_file():
         project.env["PREVIOUS_COMPOSE_FILE"] = str(previous_copy)
     ready.project = project
-    ready.deployed = Deployed(revision=ready.revision, runs=app.runs, kind=kind)
     return ready
 
 
@@ -325,13 +318,7 @@ async def _apply(yard: Yard, app: App, job: Job, ready: Ready) -> Outcome:
     code, _text = await compose.apply(config, app.name, "up", project, labels=labels, detach=detach, on_line=job.push)
     if detach:
         return Outcome("pending", ready.image, previous=previous)
-    if code == 3:
-        outcome = Outcome("reverted", ready.image, f"unhealthy; reverted to {previous}", previous)
-    elif code:
-        outcome = Outcome("failed", ready.image, f"apply exited {code}", previous)
-    else:
-        outcome = Outcome("ok", ready.image, previous=previous)
-    return outcome
+    return Outcome(status.deploy_status(code), ready.image, status.deploy_error(code, previous), previous)
 
 
 def _labels(job: Job, ready: Ready, outcome: Outcome) -> dict[str, str]:
