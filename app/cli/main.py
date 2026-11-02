@@ -581,7 +581,7 @@ def _cmd_app_set(args: argparse.Namespace) -> None:
     moved = any(key in patch and patch[key] != str(current.get(key) or "") for key in ("repo", "ref"))
     changed = "runs" in patch and patch["runs"] != str(current.get("runs") or "")
     if (moved or changed) and str(app.get("trigger") or "") == "push":
-        print(f"The next check deploys it within 5 minutes. Deploy now: yard app deploy --app {name}")
+        print(f"Saved. The next check deploys it. Deploy now: yard app deploy --app {name}")
     elif moved:
         print(f"Saved. {name} still runs the old repo and ref until the next deploy.")
         print(f"Deploy now: yard app deploy --app {name}")
