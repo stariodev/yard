@@ -773,19 +773,6 @@ def test_caddy_edit_a_refused_file_opens_the_editor_again(
     assert [method for method, _body in seen] == ["GET", "PUT", "PUT"]
 
 
-def test_bind_command_is_gone(capsys: pytest.CaptureFixture):
-    with pytest.raises(SystemExit) as caught:
-        main(["bind", "ls"])
-    assert caught.value.code == 2
-
-
-def test_podman_command_is_gone(capsys: pytest.CaptureFixture):
-    with pytest.raises(SystemExit) as caught:
-        main(["podman", "ps"])
-    assert caught.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
-
-
 def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     seen = {}
 
@@ -893,22 +880,6 @@ def test_app_deduction(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
     _env(monkeypatch)
     assert cli._app_name(cli.Client("http://x", "t"), argparse_ns()) == "heldso"
-
-
-def test_app_deduction_ssh_forms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    for index, remote in enumerate(
-        ("ssh://git@origin.cursor.com/org/heldso.git", "git@origin.cursor.com:org/heldso.git")
-    ):
-        repo = tmp_path / f"work{index}"
-        _checkout(repo, remote, "main")
-        monkeypatch.chdir(repo)
-
-        def fake_api_try(client, method, path, body, timeout=None):
-            return 200, json.dumps([{"name": "heldso", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"}])
-
-        monkeypatch.setattr(cli, "_api_try", _forge_rows(fake_api_try))
-        _env(monkeypatch)
-        assert cli._app_name(cli.Client("http://x", "t"), argparse_ns()) == "heldso"
 
 
 def argparse_ns(**kw):

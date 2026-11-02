@@ -11,6 +11,7 @@ import pytest
 from app.server import compose
 from app.server.compose import APP_COMPOSE, BUILD_COMPOSE, image_tag, project, run_env, saved_project
 from app.server.store import App, Config, Deployed
+from tests.server.conftest import make_config
 
 FULL = (
     "services:\n  app:\n    networks:\n      - yard\n"
@@ -19,17 +20,7 @@ FULL = (
 
 
 def _config(root: Path) -> Config:
-    return Config(
-        root=root,
-        podman_sock="/run/podman.sock",
-        podman_bin="podman",
-        skip_deploy=True,
-        boot=False,
-        remote=True,
-        journal_dir=root / "no-journal",
-        journalctl_bin="journalctl-missing",
-        journal_socket=root / "no-journal.sock",
-    )
+    return make_config(root, podman_sock="/run/podman.sock", podman_bin="podman", remote=True)
 
 
 def _app(name: str, trigger: str = "") -> App:

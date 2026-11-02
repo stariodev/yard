@@ -13,11 +13,9 @@ import pytest
 from app.server import doctor
 from app.server.caddy import Caddy
 from app.server.forges import GitHub, Origin
-from app.server.podman import Podman
-from app.server.store import Config, Store
 from app.server.yard import Yard
 from app.shared import YardError, now
-from tests.server.conftest import FakeCaddy
+from tests.server.conftest import FakeCaddy, FakePodman, dead_podman, make_yard
 
 CADDY_PS = (
     '[{"Names":["yard-caddy-1"],"State":"running",'
@@ -49,38 +47,29 @@ def _yard(
     journalctl = tmp_path / "journalctl"
     journalctl.write_text("#!/bin/sh\nexit 0\n")
     journalctl.chmod(0o755)
-    config = Config(
-        root=tmp_path,
-        podman_sock="",
+    yard = make_yard(
+        tmp_path,
         podman_bin="podman",
-        skip_deploy=True,
         boot=sock,
-        remote=False,
         prune_days=prune_days,
         journal_dir=tmp_path / "journal",
         journalctl_bin=str(journalctl),
         journal_socket=journal_socket or _journal_sock(),
     )
-    yard = Yard(config, Store.open(tmp_path))
 
-    class _Fake(Podman):
-        async def run(
-            self, *args: str, timeout: float | None = 20, env: dict | None = None, stdin: bytes | None = None
-        ) -> str:
-            if args and args[0] == "info":
-                return info or (
-                    '{"host":{"cpus":4,"memTotal":1000,"logDriver":"journald",'
-                    '"eventLogger":"journald"},"version":{"Version":"5.3.1"}}'
-                )
-            if args and args[0] == "ps":
-                return ps
-            if args and args[0] == "inspect":
-                return inspect
-            if args[:2] == ("system", "df"):
-                return df
-            return ""
-
-    yard.podman = _Fake("podman", False)
+    yard.podman = FakePodman(
+        {
+            "info": info
+            or (
+                '{"host":{"cpus":4,"memTotal":1000,"logDriver":"journald",'
+                '"eventLogger":"journald"},"version":{"Version":"5.3.1"}}'
+            ),
+            "ps": ps,
+            "inspect": inspect,
+            "system df": df,
+        },
+        default="",
+    )
     yard.caddy = FakeCaddy()
     return yard
 
@@ -175,26 +164,9 @@ def test_doctor_disk_says_where_the_space_went(tmp_path: Path, monkeypatch: pyte
 
 def test_doctor_disk_omits_missing_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """No podman and no journal dir: the disk row keeps only the filesystem and data parts."""
-    config = Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="podman",
-        skip_deploy=True,
-        boot=False,
-        remote=False,
-        journal_dir=tmp_path / "no-journal",
-        journalctl_bin="journalctl-missing",
-        journal_socket=tmp_path / "no-journal.sock",
-    )
-    yard = Yard(config, Store.open(tmp_path))
+    yard = make_yard(tmp_path, podman_bin="podman")
 
-    class _Dead(Podman):
-        async def run(
-            self, *args: str, timeout: float | None = 20, env: dict | None = None, stdin: bytes | None = None
-        ) -> str:
-            raise YardError(502, "podman", "podman is down")
-
-    yard.podman = _Dead("podman", False)
+    yard.podman = dead_podman()
     usage = collections.namedtuple("usage", "total used free")(200, 100, 100)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage)
     found = _run(yard)
@@ -215,13 +187,7 @@ def test_doctor_flags_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
 
-    class _Dead(Podman):
-        async def run(
-            self, *args: str, timeout: float | None = 20, env: dict | None = None, stdin: bytes | None = None
-        ) -> str:
-            raise YardError(502, "podman", "podman is down")
-
-    yard.podman = _Dead("podman", False)
+    yard.podman = dead_podman()
     usage = collections.namedtuple("usage", "total used free")(100, 95, 5)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage)
     found = _run(yard)
@@ -532,17 +498,7 @@ def test_doctor_one_installation_row_per_account(tmp_path: Path, monkeypatch: py
 
 
 def test_doctor_flags_a_missing_journal(tmp_path: Path):
-    config = Config(
-        root=tmp_path,
-        podman_sock="",
-        podman_bin="podman",
-        skip_deploy=True,
-        boot=True,
-        remote=False,
-        journal_dir=tmp_path / "no-journal",
-        journalctl_bin="journalctl-missing",
-    )
-    yard = Yard(config, Store.open(tmp_path))
+    yard = make_yard(tmp_path, podman_bin="podman", boot=True)
     found = _run(yard)
     assert found["journal"]["ok"] is False
     assert "no journal" in found["journal"]["detail"]
