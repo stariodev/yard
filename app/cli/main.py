@@ -59,6 +59,9 @@ TIMEOUT = 30
 
 FORGE_HINT = "No forge is connected. Run yard forge setup origin or yard forge setup github."
 
+# `app new --edit-env` with no PATH starts from the first of these at the top of the checkout.
+ENV_TEMPLATES = (".env.example", ".env.sample", ".env.template", "env.example")
+
 
 @dataclass(slots=True)
 class Client:
@@ -453,7 +456,7 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
     if hosts and args.no_deploy:
         _die("--caddy needs the first deploy: Yard reads the port from the running container.")
 
-    env = _new_app_env(args)
+    env = _new_app_env(args, name)
     session = _load(args)
     body: dict[str, object] = {"name": name, "repo": repo}
     if not repo_less:
@@ -498,7 +501,7 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
     _write_default_site(session, name, hosts, int(note.get("port") or 0))
 
 
-def _new_app_env(args: argparse.Namespace) -> dict[str, str]:
+def _new_app_env(args: argparse.Namespace, name: str) -> dict[str, str]:
     """The env for `app new`: --env-file, then -e pairs, then --edit-env on top."""
     env: dict[str, str] = {}
     try:
@@ -506,15 +509,38 @@ def _new_app_env(args: argparse.Namespace) -> dict[str, str]:
             env.update(parse_env(Path(args.env_file).read_text()))
         for pair in args.env or []:
             env.update(parse_env(pair))
-        if args.edit_env:
+        if args.edit_env is not None:
             if not sys.stdin.isatty():
                 _die("--edit-env needs a terminal. Use -e KEY=VALUE or --env-file PATH instead.")
-            env = parse_env(_edit_text(format_env(env)))
+            env = parse_env(_edit_text(_env_draft(env, args.edit_env)))
+            empty = [key for key, value in env.items() if not value]
+            if empty:
+                env = {key: value for key, value in env.items() if value}
+                print(f"These keys are empty, so they are not saved: {', '.join(empty)}", file=sys.stderr)
+                print(f"Set them: yard env set --app {name} {' '.join(f'{key}=…' for key in empty)}", file=sys.stderr)
     except OSError as exc:
-        _die(f"cannot read {args.env_file}: {exc.strerror or exc}")
+        _die(f"cannot read {exc.filename}: {exc.strerror or exc}")
     except YardError as exc:
         _fail(exc)
     return env
+
+
+def _env_draft(env: dict[str, str], path: str) -> str:
+    """The editor text: the env, then the template lines for the keys it does not set.
+
+    The template is PATH, else the first of ENV_TEMPLATES at the top of the checkout, else nothing.
+    """
+    if not path:
+        top = Path(_git_out("rev-parse", "--show-toplevel") or ".")
+        path = next((str(top / name) for name in ENV_TEMPLATES if (top / name).is_file()), "")
+    template = Path(path).read_text() if path else ""
+    rest = "\n".join(
+        line
+        for line in template.splitlines()
+        if line.lstrip().startswith("#") or line.strip().removeprefix("export ").partition("=")[0].strip() not in env
+    ).strip()
+    parts = [text for text in (format_env(env).strip(), rest) if text]
+    return "\n\n".join(parts) + "\n" if parts else ""
 
 
 def default_site(hosts: list[str], container: str, port: int | str) -> str:
@@ -1544,7 +1570,14 @@ def _app_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
     new.add_argument("--no-deploy", action="store_true", help="create the app without a first deploy")
     new.add_argument("-e", "--env", action="append", default=[], metavar="KEY=VALUE", help="a setting the app reads")
     new.add_argument("--env-file", metavar="PATH", default="", help="a dotenv file of settings")
-    new.add_argument("--edit-env", action="store_true", help="edit the settings in $EDITOR first")
+    new.add_argument(
+        "--edit-env",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help=f"edit the settings in $EDITOR first, starting from PATH or {ENV_TEMPLATES[0]} in the checkout",
+    )
     new.add_argument(
         "--runs", default="", help="auto, a path in the repo, yard:<template>, an image name:tag, or an https URL"
     )

@@ -186,7 +186,6 @@ def _job_json(job: Job) -> dict[str, Any]:
         "image": outcome.get("image", ""),
         "error": outcome.get("error", ""),
         "previous": outcome.get("previous", ""),
-        "missing_env": outcome.get("missing_env", ""),
         "port": outcome.get("port", 0),
     }
 

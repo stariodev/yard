@@ -1946,6 +1946,55 @@ def test_app_new_env_edit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     assert put[2] == {"A": "edited"}
 
 
+def test_app_new_edit_env_starts_from_the_checkout_template(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+):
+    sent = []
+    shown = []
+    _new_env_fakes(monkeypatch, sent)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "env.example").write_text("# Secrets\nA=\nSECRET=\n# OPT=x\nMODEL=small\n")
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    def fake_edit(text: str) -> str:
+        shown.append(text)
+        return text.replace("SECRET=", "SECRET=s3")
+
+    monkeypatch.setattr(cli, "_edit_text", fake_edit)
+    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "--edit-env"])
+    assert shown == ["A=1\n\n# Secrets\nSECRET=\n# OPT=x\nMODEL=small\n"]
+    put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
+    assert put[2] == {"A": "1", "SECRET": "s3", "MODEL": "small"}
+    assert "These keys are empty" not in capsys.readouterr().err
+
+
+def test_app_new_edit_env_takes_a_path_and_drops_empty_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+):
+    sent = []
+    _new_env_fakes(monkeypatch, sent)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.example").write_text("IGNORED=1\n")
+    (tmp_path / "prod.env").write_text("KEY=\nMODEL=big\n")
+    monkeypatch.setattr(sys, "stdin", _TTY())
+    monkeypatch.setattr(cli, "_edit_text", lambda text: text)
+    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "--edit-env", "prod.env"])
+    put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
+    assert put[2] == {"MODEL": "big"}
+    err = capsys.readouterr().err
+    assert "These keys are empty, so they are not saved: KEY" in err
+    assert "yard env set --app x KEY=" in err
+
+
+def test_app_new_edit_env_missing_path_fails_before_post(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    sent = []
+    _new_env_fakes(monkeypatch, sent)
+    monkeypatch.setattr(sys, "stdin", _TTY())
+    with pytest.raises(SystemExit):
+        main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "--edit-env", str(tmp_path / "no")])
+    assert sent == []
+
+
 def test_app_new_bad_env_fails_before_post(monkeypatch: pytest.MonkeyPatch):
     sent = []
     _new_env_fakes(monkeypatch, sent)

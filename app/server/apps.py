@@ -146,7 +146,6 @@ class Outcome:
     image: str = ""
     error: str = ""
     previous: str = ""
-    missing_env: str = ""
     port: int = 0
 
 
@@ -438,44 +437,19 @@ async def _apply(yard: Yard, app: App, plan: Plan, sha: str, job: Job, *, cause:
         detach=app.name == "yard",
         on_line=job.push,
     )
-    missing_env = _env_hint(yard, app, job)
     if app.name == "yard":
         # Upgrading yard replaces this process, so that apply run is detached.
-        return Outcome("pending", image, previous=previous, missing_env=missing_env)
+        return Outcome("pending", image, previous=previous)
     if code == 3:
-        return Outcome("reverted", image, f"unhealthy; reverted to {previous}", previous, missing_env)
+        return Outcome("reverted", image, f"unhealthy; reverted to {previous}", previous)
     if code:
-        return Outcome("failed", image, f"apply exited {code}", previous, missing_env)
+        return Outcome("failed", image, f"apply exited {code}", previous)
     write_deployed(
         config,
         app.name,
         Deployed(revision=sha, runs=plan.answer, kind=plan.kind, reason=plan.reason, template=plan.template),
     )
-    return Outcome("ok", image, previous=previous, missing_env=missing_env, port=await _exposed_port(yard, app.name))
-
-
-def _env_hint(yard: Yard, app: App, job: Job) -> str:
-    """A deploy-log hint when the app's code reads env keys that its env file does not set."""
-    try:
-        env = yard.store.read_env(app.name)
-        missing = [s for s in detect.settings(yard.config.clone(app.name)) if s.required and s.key not in env]
-    except Exception:
-        return ""
-    if not missing:
-        return ""
-    width = max(len(s.key) for s in missing)
-    rows = "".join(f"  {s.key:<{width}}  {s.where}\n" for s in missing)
-    keys = " ".join(f"{s.key}=\u2026" for s in missing)
-    hint = (
-        f"hint: {app.name} reads settings that its env does not set:\n"
-        f"{rows}"
-        f"Set them: yard env set --app {app.name} {keys}\n"
-        f"Or edit the env: yard env edit --app {app.name}\n"
-        f"Then deploy: yard app deploy --app {app.name}\n"
-    )
-    for text in hint.splitlines():
-        job.push(text)
-    return ",".join(s.key for s in missing)
+    return Outcome("ok", image, previous=previous, port=await _exposed_port(yard, app.name))
 
 
 def app_file(config: Config, app: App, which: str) -> str:
