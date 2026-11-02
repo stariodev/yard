@@ -15,7 +15,7 @@ from stario.json import JsonValue
 from app.server import apps, doctor, journal, repos, sites, status
 from app.server.forges import Forge, GitHub, Origin
 from app.server.logfilter import Held, LogFilter
-from app.server.store import App, Config, Deployed, Store, read_deployed
+from app.server.store import App, Config, Deployed, Store
 from app.server.yard import Job, Yard
 from app.shared import YardError, now
 
@@ -95,9 +95,9 @@ def app_json(app: App, deployed: Deployed | None = None) -> dict[str, Any]:
     }
 
 
-def page_json(page: status.Page, deployed: Deployed | None = None) -> dict[str, Any]:
+def page_json(page: status.Page) -> dict[str, Any]:
     return {
-        "app": app_json(page.app, deployed),
+        "app": app_json(page.app, page.deployed),
         "image": page.image,
         "sha": page.sha,
         "env_file": page.env_file,
@@ -155,7 +155,6 @@ def _job_json(job: Job) -> dict[str, Any]:
         "image": outcome.get("image", ""),
         "error": outcome.get("error", ""),
         "previous": outcome.get("previous", ""),
-        "port": outcome.get("port", 0),
     }
 
 
@@ -224,15 +223,19 @@ def _event_row(entry: dict) -> dict | None:
                 labels = json.loads(labels)
             except ValueError:
                 labels = None
-        if isinstance(labels, dict):
-            app = str(labels.get("com.docker.compose.project") or "")
+        if not isinstance(labels, dict):
+            labels = {}
+        app = str(labels.get("com.docker.compose.project") or "")
+        event = str(entry.get("PODMAN_EVENT") or "")
         if not app and container.startswith("deploy-"):
             # The apply container is not on a compose project.
             app = container.split("-", 1)[1]
+            if event in ("create", "died"):
+                return _deploy_row(entry, when, app, container, event, labels)
         row: dict[str, Any] = {
             "time": when,
             "source": "podman",
-            "event": str(entry.get("PODMAN_EVENT") or ""),
+            "event": event,
             "app": app,
             "container": container,
             "container_id": str(entry.get("PODMAN_ID") or ""),
@@ -262,6 +265,41 @@ def _event_row(entry: dict) -> dict | None:
     else:
         return None
     return {key: value for key, value in row.items() if value not in ("", {}, False, None)}
+
+
+def _deploy_row(entry: dict, when: str, app: str, container: str, event: str, labels: dict) -> dict:
+    """The create and died events of `deploy-<name>` are the deploy.start and deploy.end rows.
+
+    The labels are the record, so these rows survive a Yard restart in the middle of a deploy.
+    """
+    given = {str(key)[5:]: str(value) for key, value in labels.items() if str(key).startswith("yard.") and value}
+    sha = given.get("sha", "")
+    if event == "create":
+        name, state, message = "deploy.start", "", f"deploy {app} {sha[:12]}".rstrip()
+        fields = {key: given.get(key, "") for key in ("image", "runs", "kind", "cause")}
+    else:
+        code = str(entry.get("PODMAN_EXIT_CODE") or "0")
+        state = {"0": "ok", "3": "reverted"}.get(code, "failed")
+        error = given.get("error", "")
+        if not error and state == "failed":
+            error = f"apply exited {code}"
+        elif not error and state == "reverted":
+            error = f"unhealthy; reverted to {given.get('previous', '')}"
+        name, message = "deploy.end", f"deploy {app} {state}"
+        fields = {"image": given.get("image", ""), "previous": given.get("previous", ""), "error": error}
+    row = {
+        "time": when,
+        "source": "yard",
+        "event": name,
+        "app": app,
+        "container": container,
+        "actor": given.get("actor", ""),
+        "sha": sha,
+        "status": state,
+        "message": message,
+        "fields": {key: value for key, value in fields.items() if value},
+    }
+    return {key: value for key, value in row.items() if value not in ("", {})}
 
 
 def _event_keeps(row: dict, app: str, container: str, source: str, event: str) -> bool:
@@ -745,7 +783,8 @@ class AppsPage:
         app.add(CADDY_PUT, self.caddy_put, middleware=middleware)
 
     async def apps_list(self, _c: Context, w: Writer) -> None:
-        w.json([app_json(app, read_deployed(self.yard.config, app.name)) for app in self.yard.store.list_apps()])
+        listed = await status.list_containers(self.yard)
+        w.json([app_json(app, status.running_plan(app, listed)) for app in self.yard.store.list_apps()])
 
     async def apps_create(self, c: Context, w: Writer) -> None:
         data = await json_object(c)
@@ -782,8 +821,7 @@ class AppsPage:
 
     async def app_page(self, c: Context, w: Writer) -> None:
         page = await status.app_report(self.yard, c.match.params["name"])
-        deployed = read_deployed(self.yard.config, page.app.name)
-        w.json(cast(JsonValue, page_json(page, deployed)))
+        w.json(cast(JsonValue, page_json(page)))
 
     async def app_patch(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]
@@ -796,7 +834,7 @@ class AppsPage:
                 help_text="Set one of repo, ref, trigger, or runs.",
             )
         app = apps.update(self.yard, name, actor=_actor(c), **cast(dict[str, Any], fields))
-        w.json(cast(JsonValue, {"app": app_json(app, read_deployed(self.yard.config, name))}))
+        w.json(cast(JsonValue, {"app": app_json(app, await status.get_plan(self.yard, app))}))
 
     async def app_delete(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]
@@ -855,14 +893,17 @@ class AppsPage:
                     await asyncio.wait_for(job.changed.wait(), 15)
                 except TimeoutError:
                     pass
-        w.write(json.dumps({"deploy": _job_json(job)}).encode() + b"\n")
+        body = _job_json(job)
+        if job.status == "ok":
+            body["port"] = await apps.exposed_port(self.yard, name)
+        w.write(json.dumps({"deploy": body}).encode() + b"\n")
         await w.drain()
         w.end()
 
     async def app_file(self, c: Context, w: Writer) -> None:
         """The compose or Containerfile an app runs, as text/plain."""
         app = self.yard.store.app(c.match.params["name"])
-        w.text(apps.app_file(self.yard.config, app, c.match.params["which"]))
+        w.text(apps.app_file(self.yard.config, app, await status.get_plan(self.yard, app), c.match.params["which"]))
 
     async def env_show(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]

@@ -36,7 +36,7 @@ async def bootstrap(app: App, span: Span):
 
 
 async def boot(yard: Yard, app: App) -> None:
-    """Directories, the yard record, the network, and the background tasks."""
+    """Directories, the yard record, the network, the two background tasks."""
     config = yard.config
     (config.root / "apps").mkdir(parents=True, exist_ok=True)
     (config.root / "tokens").mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -55,7 +55,6 @@ async def boot(yard: Yard, app: App) -> None:
     # The apply image build pulls a base image. The server answers while that build runs.
     yard.tasks.append(app.create_task(_apply_image(yard), name="apply-image"))
     yard.tasks.append(app.create_task(apps.loop(yard), name="checks"))
-    yard.tasks.append(app.create_task(apps.settle(yard), name="settle"))
     yard.tasks.append(app.create_task(sites.boot(yard), name="caddy"))
     if config.prune_days > 0:
         yard.tasks.append(app.create_task(apps.prune_loop(yard), name="prune"))

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.server.store import App, read_deployed
+from app.server.store import App, Deployed
 from app.shared import YardError, deploy_container, ensure_file, short_sha
 
 if TYPE_CHECKING:
@@ -89,9 +89,8 @@ def project(
     return Project(app.name, files, env)
 
 
-def saved_project(config: Config, app: App) -> Project | None:
-    """Rebuild the project for a purge from the deployed file; None when there is none."""
-    deployed = read_deployed(config, app.name)
+def saved_project(config: Config, app: App, deployed: Deployed | None) -> Project | None:
+    """Rebuild the project for a purge from the running plan; None when there is none."""
     if deployed is None or not deployed.revision:
         return None
     if deployed.kind == "image":

@@ -10,7 +10,7 @@ import pytest
 
 from app.server import compose
 from app.server.compose import APP_COMPOSE, BUILD_COMPOSE, image_tag, project, run_env, saved_project
-from app.server.store import App, Config, Deployed, write_deployed
+from app.server.store import App, Config, Deployed
 
 FULL = (
     "services:\n  app:\n    networks:\n      - yard\n"
@@ -136,41 +136,37 @@ def test_the_yard_app_gets_its_host_paths_from_config(tmp_path: Path):
     assert other["YARD_PODMAN_SOCK"] == "/run/podman/podman.sock"
 
 
-def test_saved_project_rebuilds_from_the_deployed_file(tmp_path: Path):
+def test_saved_project_rebuilds_from_the_running_plan(tmp_path: Path):
     config = _config(tmp_path)
     checkout = config.clone("heldso")
     checkout.mkdir(parents=True)
     (checkout / "Containerfile").write_text("FROM scratch\n")
     _git(checkout)
     sha = _git_out(checkout, "rev-parse", "HEAD")
-    write_deployed(config, "heldso", Deployed(revision=sha, runs="Containerfile", kind="containerfile"))
-    found = saved_project(config, _app("heldso"))
+    found = saved_project(config, _app("heldso"), Deployed(revision=sha, runs="Containerfile", kind="containerfile"))
     assert found is not None
     assert found.files == [APP_COMPOSE, BUILD_COMPOSE]
     assert found.env["IMAGE"] == image_tag("heldso", sha)
     assert found.env["DOCKERFILE"] == "Containerfile"
 
     (checkout / "compose.yml").write_text(FULL)
-    write_deployed(config, "heldso", Deployed(revision=sha, runs="compose.yml", kind="compose"))
-    found = saved_project(config, _app("heldso"))
+    found = saved_project(config, _app("heldso"), Deployed(revision=sha, runs="compose.yml", kind="compose"))
     assert found is not None and found.files == [str(checkout / "compose.yml")]
 
-    write_deployed(
-        config, "heldso", Deployed(revision=sha, runs="yard:python-uv", kind="containerfile", template="3f9a1c2e")
+    found = saved_project(
+        config, _app("heldso"), Deployed(revision=sha, runs="yard:python-uv", kind="containerfile", template="3f9a1c2e")
     )
-    found = saved_project(config, _app("heldso"))
     assert found is not None
     assert found.env["IMAGE"] == image_tag("heldso", sha, "3f9a1c2e")
     assert found.env["DOCKERFILE"] == str(tmp_path / "apps" / "heldso" / "Containerfile")
 
-    assert saved_project(config, _app("other")) is None
+    assert saved_project(config, _app("other"), None) is None
 
 
 def test_saved_project_image_app(tmp_path: Path):
     config = _config(tmp_path)
     app = App("db", "", "main", "push", "", "postgres:17")
-    write_deployed(config, "db", Deployed(revision="sha256:" + "a" * 64, runs="postgres:17", kind="image"))
-    found = saved_project(config, app)
+    found = saved_project(config, app, Deployed(revision="sha256:" + "a" * 64, runs="postgres:17", kind="image"))
     assert found is not None
     assert found.files == [APP_COMPOSE]
     assert found.env["IMAGE"] == "postgres:17@sha256:" + "a" * 64
@@ -183,8 +179,7 @@ def test_saved_project_url_compose(tmp_path: Path):
     copy.parent.mkdir(parents=True)
     copy.write_text("services: {}\n")
     app = App("u", "", "main", "push", "", "https://example.com/x.yml")
-    write_deployed(config, "u", Deployed(revision=rev, runs=app.runs, kind="compose"))
-    found = saved_project(config, app)
+    found = saved_project(config, app, Deployed(revision=rev, runs=app.runs, kind="compose"))
     assert found is not None and found.files == [str(copy)]
 
 
