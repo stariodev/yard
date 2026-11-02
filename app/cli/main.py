@@ -1460,7 +1460,6 @@ def _edit_text(initial: str, suffix: str = ".env") -> str:
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", help="print JSON")
-    common.add_argument("--text", action="store_true", help="print text")
     common.add_argument("--no-color", action="store_true", help="plain output")
     common.add_argument("--url", default="", help="the host address")
     common.add_argument("--token", default="", help="a token")
@@ -1688,7 +1687,7 @@ def main(argv: list[str] | None = None) -> None:
     global _no_color, _json
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     _no_color = args.no_color
-    _json = _as_json(args)
+    _json = args.json
     if args.version:
         print(package_version())
         return
@@ -1696,11 +1695,3 @@ def main(argv: list[str] | None = None) -> None:
         _parser().print_help()
         return
     args.func(args)
-
-
-def _as_json(args: argparse.Namespace) -> bool:
-    if args.json:
-        return True
-    if args.text:
-        return False
-    return not sys.stdout.isatty()

@@ -46,9 +46,9 @@ def test_resource_ls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixt
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
 
-    main(["app", "ls", "--text"])
+    main(["app", "ls"])
     assert "heldso" in capsys.readouterr().out
-    main(["token", "ls", "--text"])
+    main(["token", "ls"])
     assert "ada" in capsys.readouterr().out
 
 
@@ -84,12 +84,12 @@ def test_main_end_to_end(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
 
-    main(["status", "--text"])
+    main(["status"])
     out = capsys.readouterr().out
     assert "heldso-app" in out
     assert "host:" in out
 
-    main(["app", "status", "--app", "heldso", "--text"])
+    main(["app", "status", "--app", "heldso"])
     out = capsys.readouterr().out
     assert "heldso" in out
 
@@ -136,7 +136,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
 
-    main(["app", "status", "--app", "heldso", "--text"])
+    main(["app", "status", "--app", "heldso"])
     out = capsys.readouterr().out
     assert "caddy heldso.example.com" in out
     assert "containers" in out
@@ -144,7 +144,7 @@ def test_app_status_and_doctor(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     assert "  two" in out
 
     with pytest.raises(SystemExit) as exited:
-        main(["status", "--full", "--text"])
+        main(["status", "--full"])
     assert exited.value.code == 1
     out = capsys.readouterr().out
     assert "ok   podman" in out
@@ -167,7 +167,7 @@ def test_app_deploy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtu
     note = {"status": "ok", "image": "localhost/app:abc"}
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: (print("ready"), note)[1])
 
-    main(["app", "deploy", "--app", "nightly", "--text"])
+    main(["app", "deploy", "--app", "nightly"])
     assert seen[("POST", "/api/v1/apps/nightly/deploy")] == {}
     assert "ready" in capsys.readouterr().out
 
@@ -204,7 +204,7 @@ _RM_PAGE = {
 def test_app_rm_refuses_a_non_tty(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "rm", "--app", "heldso", "--text"])
+        main(["app", "rm", "--app", "heldso"])
     err = capsys.readouterr().err
     assert "needs a confirmation" in err
     assert "--yes" in err
@@ -216,7 +216,7 @@ def test_app_rm_confirms_and_names_the_site(monkeypatch: pytest.MonkeyPatch, cap
     monkeypatch.setattr(sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": "heldso")
     _env(monkeypatch)
-    main(["app", "rm", "--app", "heldso", "--text"])
+    main(["app", "rm", "--app", "heldso"])
     out = capsys.readouterr().out
     assert "This deletes the app heldso:" in out
     assert "heldso-app-1" in out
@@ -238,7 +238,7 @@ def test_app_rm_a_wrong_answer_removes_nothing(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr("builtins.input", lambda _prompt="": "other")
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "rm", "--app", "heldso", "--text"])
+        main(["app", "rm", "--app", "heldso"])
     assert "Not removed: you typed 'other', the app is 'heldso'" in capsys.readouterr().err
     assert [call for call in calls if call[0] == "DELETE"] == []
 
@@ -252,7 +252,7 @@ def test_app_rm_yes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtu
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "rm", "--app", "heldso", "--yes", "--text"])
+    main(["app", "rm", "--app", "heldso", "--yes"])
     assert calls == [("DELETE", "/api/v1/apps/heldso")]
     assert capsys.readouterr().out == "removed heldso\n"
 
@@ -265,7 +265,7 @@ def test_app_rm_warns_when_caddy_refuses(monkeypatch: pytest.MonkeyPatch, capsys
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "rm", "--app", "heldso", "--yes", "--text"])
+    main(["app", "rm", "--app", "heldso", "--yes"])
     out = capsys.readouterr().out
     assert "Caddy did not load the config without the site: caddy POST /load: no socket" in out
     assert "yard status --full" in out
@@ -276,7 +276,7 @@ def test_not_logged_in_points_at_login(monkeypatch: pytest.MonkeyPatch, capsys: 
     monkeypatch.delenv("YARD_TOKEN", raising=False)
     monkeypatch.setattr(cli, "config_path", lambda: Path("/nonexistent/yard/config.json"))
     with pytest.raises(SystemExit):
-        main(["app", "ls", "--text"])
+        main(["app", "ls"])
     err = capsys.readouterr().err
     assert "not logged in" in err
     assert "yard login --url https://<your yard host> --token <token>" in err
@@ -292,7 +292,7 @@ def test_api_unreachable_names_the_url(monkeypatch: pytest.MonkeyPatch, capsys: 
     monkeypatch.setattr(cli.urllib.request, "urlopen", boom)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "ls", "--text"])
+        main(["app", "ls"])
     err = capsys.readouterr().err
     assert "the Yard API at http://127.0.0.1:8000 did not answer: " in err
     assert "yard login" in err
@@ -306,7 +306,7 @@ def test_a_deploy_timeout_points_at_the_deploy_log(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(cli.urllib.request, "urlopen", boom)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "deploy", "--app", "heldso", "--text"])
+        main(["app", "deploy", "--app", "heldso"])
     err = capsys.readouterr().err
     assert "did not answer" in err
     assert "The deploy may still be running" in err
@@ -316,7 +316,7 @@ def test_a_deploy_timeout_points_at_the_deploy_log(monkeypatch: pytest.MonkeyPat
 def test_env_set_needs_key_value(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["env", "set", "notakey", "--app", "heldso", "--text"])
+        main(["env", "set", "notakey", "--app", "heldso"])
     err = capsys.readouterr().err
     assert "need KEY=VALUE, got notakey" in err
     assert "Example: yard env set DATABASE_PATH=/data/app.sqlite3" in err
@@ -331,7 +331,7 @@ def test_env_edit_an_editor_failure_saves_nothing(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(sys, "stdin", _TTY())
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["env", "edit", "--app", "heldso", "--text"])
+        main(["env", "edit", "--app", "heldso"])
     err = capsys.readouterr().err
     assert "the editor exited with 3; nothing was saved" in err
 
@@ -345,7 +345,7 @@ def test_app_deploy_failed_reads_the_log_hint(monkeypatch: pytest.MonkeyPatch, c
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: wrap["deploy"])
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "deploy", "--app", "heldso", "--text"])
+        main(["app", "deploy", "--app", "heldso"])
     out = capsys.readouterr().out
     assert "failed" in out
     assert "Read the full log: yard app logs --deploy --app heldso" in out
@@ -364,7 +364,7 @@ def test_app_deploy_reverted_explains_the_old_image(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, json.dumps(wrap)))
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: wrap["deploy"])
     _env(monkeypatch)
-    main(["app", "deploy", "--app", "heldso", "--text"])
+    main(["app", "deploy", "--app", "heldso"])
     out = capsys.readouterr().out
     assert "The new container never got healthy, so the previous image still runs." in out
     assert "yard app logs --deploy --app heldso, then yard app logs --app heldso" in out
@@ -381,7 +381,7 @@ def test_app_deploy_a_server_500_keeps_the_log_hint(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (500, json.dumps(body)))
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "deploy", "--app", "heldso", "--text"])
+        main(["app", "deploy", "--app", "heldso"])
     assert "yard app logs --deploy --app heldso" in capsys.readouterr().err
 
 
@@ -417,7 +417,6 @@ def test_app_new(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture)
         [
             "app",
             "new",
-            "--text",
             "--repo",
             "https://origin.cursor.com/org/heldso",
             "--ref",
@@ -464,7 +463,7 @@ def test_app_new_no_deploy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captu
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/heldso", "--no-deploy"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/heldso", "--no-deploy"])
     assert seen == [
         ("POST", "/api/v1/apps", {"name": "heldso", "repo": "https://origin.cursor.com/org/heldso", "ref": "main"})
     ]
@@ -491,7 +490,7 @@ def test_app_new_a_failed_deploy_keeps_the_app(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
     with pytest.raises(SystemExit) as caught:
-        main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/heldso"])
+        main(["app", "new", "--repo", "https://origin.cursor.com/org/heldso"])
     assert caught.value.code == 1
     err = capsys.readouterr().err
     assert "heldso was created, but the first deploy failed." in err
@@ -509,7 +508,7 @@ def test_app_rm_ctrl_c_says_not_removed(monkeypatch: pytest.MonkeyPatch, capsys:
     monkeypatch.setattr("builtins.input", _interrupt)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "rm", "--app", "heldso", "--text"])
+        main(["app", "rm", "--app", "heldso"])
     err = capsys.readouterr().err
     assert err.strip() == "Not removed."
     assert "stopped" not in err
@@ -537,7 +536,7 @@ def test_app_new_trigger(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
 
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/app", "--ref", "dev", "--trigger", "manual"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/app", "--ref", "dev", "--trigger", "manual"])
     body = seen[("POST", "/api/v1/apps")]
     assert body["trigger"] == "manual"
     assert body["name"] == "app-dev"
@@ -563,7 +562,7 @@ def test_app_new_ref_follows_the_checkout_repo(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
 
     # A repo that is not the checkout's gets main, not the checkout branch.
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/other"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/other"])
     assert seen[("POST", "/api/v1/apps")] == {
         "name": "other",
         "repo": "https://origin.cursor.com/org/other",
@@ -571,7 +570,7 @@ def test_app_new_ref_follows_the_checkout_repo(monkeypatch: pytest.MonkeyPatch, 
     }
 
     # The checkout's own repo, spelled with other case, takes the branch.
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/ORG/HELDSO"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/ORG/HELDSO"])
     assert seen[("POST", "/api/v1/apps")] == {
         "name": "heldso-feature-x",
         "repo": "https://origin.cursor.com/ORG/HELDSO",
@@ -600,21 +599,21 @@ def test_app_set_message(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     _env(monkeypatch)
 
     # A ref move on a push app points at the next check.
-    main(["app", "set", "--app", "heldso", "--ref", "dev", "--text"])
+    main(["app", "set", "--app", "heldso", "--ref", "dev"])
     out = capsys.readouterr().out
     assert "next check deploys it within 5 minutes" in out
     assert "Deploy now: yard app deploy --app heldso" in out
 
     # A trigger change does not move the code.
-    main(["app", "set", "--app", "heldso", "--trigger", "manual", "--text"])
+    main(["app", "set", "--app", "heldso", "--trigger", "manual"])
     assert capsys.readouterr().out == "Saved.\n"
 
     # The same ref is not a move.
-    main(["app", "set", "--app", "heldso", "--ref", "dev", "--text"])
+    main(["app", "set", "--app", "heldso", "--ref", "dev"])
     assert capsys.readouterr().out == "Saved.\n"
 
     # A ref move on a manual app names the deploy command.
-    main(["app", "set", "--app", "heldso", "--ref", "main", "--text"])
+    main(["app", "set", "--app", "heldso", "--ref", "main"])
     assert capsys.readouterr().out == (
         "Saved. heldso still runs the old repo and ref until the next deploy.\n"
         "Deploy now: yard app deploy --app heldso\n"
@@ -645,23 +644,25 @@ def test_env_commands(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFix
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
 
-    main(["env", "set", "B=2", "C=3", "--app", "heldso", "--text"])
+    main(["env", "set", "B=2", "C=3", "--app", "heldso"])
     assert seen[("PATCH", "/api/v1/apps/heldso/env")] == {"B": "2", "C": "3"}
     assert capsys.readouterr().out == (
         "Saved. heldso keeps its old settings until the next deploy.\nApply now: yard app deploy --app heldso\n"
     )
 
-    main(["env", "unset", "A", "--app", "heldso", "--text"])
+    main(["env", "unset", "A", "--app", "heldso"])
     assert seen[("PATCH", "/api/v1/apps/heldso/env")] == {"A": None}
 
-    main(["env", "cat", "--app", "heldso", "--text"])
+    # capsys is not a terminal: a pipe still gets the dotenv text, not JSON.
+    main(["env", "cat", "--app", "heldso"])
     out = capsys.readouterr().out
     assert "B=2" in out
+    assert not out.startswith("{")
 
-    main(["env", "get", "B", "--app", "heldso", "--text"])
+    main(["env", "get", "B", "--app", "heldso"])
     assert capsys.readouterr().out == "2\n"
     with pytest.raises(SystemExit):
-        main(["env", "get", "NOPE", "--app", "heldso", "--text"])
+        main(["env", "get", "NOPE", "--app", "heldso"])
     assert "NOPE is not set for heldso" in capsys.readouterr().err
 
 
@@ -688,15 +689,15 @@ def test_caddy_cat_and_edit_from_stdin(monkeypatch: pytest.MonkeyPatch, capsys: 
     monkeypatch.setattr(cli, "_api_try", _caddy_api(site, seen))
     _env(monkeypatch)
 
-    main(["caddy", "cat", "--app", "heldso", "--text"])
+    main(["caddy", "cat", "--app", "heldso"])
     assert capsys.readouterr().out == ""
 
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"heldso.example.com {\n}\n")))
-    main(["caddy", "edit", "--app", "heldso", "--text"])
+    main(["caddy", "edit", "--app", "heldso"])
     assert seen[-1] == ("PUT", b"heldso.example.com {\n}\n")
     assert capsys.readouterr().out == "Saved. Caddy serves heldso.example.com for heldso.\n"
 
-    main(["caddy", "cat", "--app", "heldso", "--text"])
+    main(["caddy", "cat", "--app", "heldso"])
     assert capsys.readouterr().out == "heldso.example.com {\n}\n"
 
 
@@ -709,12 +710,12 @@ def test_caddy_edit_in_the_editor(monkeypatch: pytest.MonkeyPatch, capsys: pytes
 
     # An unchanged example saves nothing.
     monkeypatch.setattr(cli, "_edit_text", lambda text, suffix="": text)
-    main(["caddy", "edit", "--app", "heldso", "--text"])
+    main(["caddy", "edit", "--app", "heldso"])
     assert capsys.readouterr().out == "No change.\n"
     assert [method for method, _body in seen] == ["GET"]
 
     monkeypatch.setattr(cli, "_edit_text", lambda text, suffix="": "heldso.example.com {\n}\n")
-    main(["caddy", "edit", "--app", "heldso", "--text"])
+    main(["caddy", "edit", "--app", "heldso"])
     assert site["text"] == "heldso.example.com {\n}\n"
     assert "Saved. Caddy serves heldso.example.com" in capsys.readouterr().out
 
@@ -736,7 +737,7 @@ def test_caddy_edit_a_refused_file_opens_the_editor_again(
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["caddy", "edit", "--app", "heldso", "--text"])
+        main(["caddy", "edit", "--app", "heldso"])
     err = capsys.readouterr().err
     assert "heldso.caddy:2: unrecognized directive: x" in err
     assert "Not saved. Caddy keeps the site it had." in err
@@ -778,13 +779,13 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
 
-    main(["prune", "--text"])
+    main(["prune"])
     assert seen[("POST", "/api/v1/prune")] == {"days": 7, "dry": False}
     out = capsys.readouterr().out
     assert "removed 1 images, 3kB" in out
     assert "kept localhost/busy:t4g (image is in use by heldso-app-1)" in out
 
-    main(["prune", "--days", "1", "--dry-run", "--text"])
+    main(["prune", "--days", "1", "--dry-run"])
     assert seen[("POST", "/api/v1/prune")] == {"days": 1, "dry": True}
     assert "would remove" in capsys.readouterr().out
 
@@ -906,7 +907,7 @@ def test_app_deduction_feature_branch_names_the_app(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
-    main(["app", "new", "--text"])
+    main(["app", "new"])
     assert seen[("POST", "/api/v1/apps")] == {
         "name": "heldso-feature-x",
         "repo": "https://origin.cursor.com/org/heldso",
@@ -980,7 +981,7 @@ def test_forge_ls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ]
     monkeypatch.setattr(cli, "_api_try", lambda *a, **k: (200, json.dumps(rows)))
     _env(monkeypatch)
-    main(["forge", "ls", "--text"])
+    main(["forge", "ls"])
     out = capsys.readouterr().out
     assert "origin" in out and "github" in out and "yes" in out
     assert "selection" in out and "all" in out
@@ -1059,7 +1060,7 @@ def test_forge_setup_origin(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("app_123"))
     _env(monkeypatch)
-    main(["forge", "setup", "origin", "--no-browser", "--text"])
+    main(["forge", "setup", "origin", "--no-browser"])
     out = capsys.readouterr().out
     assert "PUB" in out
     assert "http://127.0.0.1:8000/hooks/origin" in out
@@ -1108,7 +1109,7 @@ def test_forge_setup_polls_and_warns(monkeypatch: pytest.MonkeyPatch, capsys: py
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("app_123"))
     _env(monkeypatch)
-    main(["forge", "setup", "origin", "--no-browser", "--text"])
+    main(["forge", "setup", "origin", "--no-browser"])
     captured = capsys.readouterr()
     assert "Done." in captured.out
     assert len(reads) >= 3
@@ -1122,7 +1123,7 @@ def test_forge_setup_origin_reprompts_a_bad_app_id(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     monkeypatch.setattr("builtins.input", _answers("app_a b", "app_123"))
     _env(monkeypatch)
-    main(["forge", "setup", "origin", "--no-browser", "--text"])
+    main(["forge", "setup", "origin", "--no-browser"])
     assert "not an app ID" in capsys.readouterr().err
     puts = [call for call in calls if call[0] == "PUT"]
     assert puts == [("PUT", "/api/v1/forges/origin", {"app_id": "app_123"})]
@@ -1138,7 +1139,7 @@ def test_forge_setup_github(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
     monkeypatch.setattr("builtins.input", _answers("42", ""))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "s" * 64)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--manual", "--key", str(pem), "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--manual", "--key", str(pem), "--no-browser"])
     out = capsys.readouterr().out
     err = capsys.readouterr().err
     assert "s" * 64 in out
@@ -1166,7 +1167,7 @@ def test_forge_setup_github_refuses_http_to_a_remote(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("YARD_URL", "http://yard.example.com")
     monkeypatch.setenv("YARD_TOKEN", "token")
     with pytest.raises(SystemExit):
-        main(["forge", "setup", "github", "--no-browser", "--text"])
+        main(["forge", "setup", "github", "--no-browser"])
     assert "refusing to send the private key over http" in capsys.readouterr().err
     assert called == []
 
@@ -1182,7 +1183,7 @@ def test_forge_setup_github_accepts_quoted_and_escaped_paths(monkeypatch: pytest
         calls: list = []
         monkeypatch.setattr(cli, "_api_try", _fake_setup_api(calls))
         monkeypatch.setattr("builtins.input", _answers("42", answer))
-        main(["forge", "setup", "github", "--manual", "--no-browser", "--text"])
+        main(["forge", "setup", "github", "--manual", "--no-browser"])
         put = [call for call in calls if call[0] == "PUT"]
         assert put == [
             (
@@ -1204,7 +1205,7 @@ def test_forge_setup_github_reprompts_a_missing_key(
     monkeypatch.setattr("builtins.input", _answers("42", str(tmp_path / "missing.pem"), str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "s" * 64)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--manual", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--manual", "--no-browser"])
     assert "cannot read the key" in capsys.readouterr().err
     put = [call for call in calls if call[0] == "PUT"]
     assert put == [("PUT", "/api/v1/forges/github", {"app_id": "42", "private_key": PEM, "webhook_secret": "s" * 64})]
@@ -1221,7 +1222,7 @@ def test_forge_setup_github_reprompts_a_bad_app_id(
     monkeypatch.setattr("builtins.input", _answers("forty-two", "42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "s" * 64)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--manual", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--manual", "--no-browser"])
     assert "not an app ID" in capsys.readouterr().err
     put = [call for call in calls if call[0] == "PUT"]
     assert put == [("PUT", "/api/v1/forges/github", {"app_id": "42", "private_key": PEM, "webhook_secret": "s" * 64})]
@@ -1255,7 +1256,7 @@ def test_forge_setup_github_retries_after_a_client_error(
     monkeypatch.setattr("builtins.input", _answers("41", str(pem), "42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "s" * 64)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--manual", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--manual", "--no-browser"])
     assert "the app id does not match the key" in capsys.readouterr().err
     put = [call for call in calls if call[0] == "PUT"]
     assert [call[2]["app_id"] for call in put] == ["41", "42"]
@@ -1276,7 +1277,7 @@ def test_forge_setup_github_resumes_a_stopped_run(
     # Run 1 stops at the key prompt; the pending setup stays on disk.
     monkeypatch.setattr("builtins.input", _eof_after("42"))
     with pytest.raises(SystemExit):
-        main(["forge", "setup", "github", "--manual", "--text"])
+        main(["forge", "setup", "github", "--manual"])
     pending = cfg / "github-setup.json"
     saved = json.loads(pending.read_text())
     assert stat.S_IMODE(pending.stat().st_mode) == 0o600
@@ -1286,7 +1287,7 @@ def test_forge_setup_github_resumes_a_stopped_run(
 
     # Run 2 reuses the secret; the app form prints but does not open again.
     monkeypatch.setattr("builtins.input", _answers("42", str(pem)))
-    main(["forge", "setup", "github", "--manual", "--text"])
+    main(["forge", "setup", "github", "--manual"])
     out = capsys.readouterr().out
     assert "Continuing the setup from" in out
     assert "settings/apps/new" in out
@@ -1319,7 +1320,7 @@ def test_forge_setup_github_new_mints_a_fresh_secret(
     monkeypatch.setattr("builtins.input", _answers("42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "n" * 64)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--manual", "--new", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--manual", "--new", "--no-browser"])
     assert "Continuing" not in capsys.readouterr().out
     put = [call for call in calls if call[0] == "PUT"]
     assert put == [("PUT", "/api/v1/forges/github", {"app_id": "42", "private_key": PEM, "webhook_secret": "n" * 64})]
@@ -1350,7 +1351,7 @@ def test_forge_setup_github_continues_to_the_install(
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     monkeypatch.setattr(cli, "SETUP_POLL", 0.0)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--no-browser"])
     out = capsys.readouterr().out
     assert "https://github.com/apps/yard-host/installations/new" in out
     assert "Done." in out
@@ -1381,7 +1382,7 @@ def test_forge_setup_github_already_connected(
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--no-browser"])
     out = capsys.readouterr().out
     assert "already connected" in out
     assert "Bobowski (101)" in out
@@ -1420,7 +1421,7 @@ def test_forge_setup_github_new_ignores_a_connected_forge(
     monkeypatch.setattr("builtins.input", _answers("42", str(pem)))
     monkeypatch.setattr(cli.secrets, "token_hex", lambda n: "n" * 64)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--manual", "--new", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--manual", "--new", "--no-browser"])
     out = capsys.readouterr().out
     assert "Continuing" not in out
     assert "Done." in out
@@ -1530,7 +1531,7 @@ def test_forge_setup_github_manifest(monkeypatch: pytest.MonkeyPatch, capsys: py
     monkeypatch.setattr(cli.webbrowser, "open", _drive_manifest(opened, bad_state_first=True))
     monkeypatch.setattr(cli.urllib.request, "urlopen", _fake_conversion)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--text"])
+    main(["forge", "setup", "github"])
     captured = capsys.readouterr()
     out = captured.out
     assert "Opening the GitHub App form. Keep the name or change it" in out
@@ -1569,7 +1570,7 @@ def test_forge_setup_github_manifest_no_browser(
     monkeypatch.setattr(cli, "_open", fake_open)
     monkeypatch.setattr(cli.urllib.request, "urlopen", _fake_conversion)
     _env(monkeypatch)
-    main(["forge", "setup", "github", "--no-browser", "--text"])
+    main(["forge", "setup", "github", "--no-browser"])
     out = capsys.readouterr().out
     assert "http://127.0.0.1:" in out
     assert "Open it in a browser on this computer; GitHub sends you back to it." in out
@@ -1586,7 +1587,7 @@ def test_forge_setup_github_manifest_times_out(
     monkeypatch.setattr(cli, "_open", lambda args, url: None)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["forge", "setup", "github", "--no-browser", "--text"])
+        main(["forge", "setup", "github", "--no-browser"])
     assert "No answer from GitHub in ten minutes" in capsys.readouterr().err
 
 
@@ -1619,7 +1620,7 @@ def test_forge_setup_github_manifest_keeps_a_failed_put(
     _env(monkeypatch)
 
     with pytest.raises(SystemExit):
-        main(["forge", "setup", "github", "--text"])
+        main(["forge", "setup", "github"])
     err = capsys.readouterr().err
     assert "the secret is too short" in err
     assert "The key is kept in" in err
@@ -1631,7 +1632,7 @@ def test_forge_setup_github_manifest_keeps_a_failed_put(
     # The rerun goes straight to the PUT; the browser opens the install page only.
     opened.clear()
     monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url))
-    main(["forge", "setup", "github", "--text"])
+    main(["forge", "setup", "github"])
     out = capsys.readouterr().out
     assert "Finishing the app created at" in out
     assert "saving its key in Yard" in out
@@ -1653,7 +1654,7 @@ def test_app_logs_builds_the_query(monkeypatch: pytest.MonkeyPatch, capsys: pyte
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "logs", "--app", "heldso", "--since", "-1h", "--deploy", "--tail", "50", "--text"])
+    main(["app", "logs", "--app", "heldso", "--since", "-1h", "--deploy", "--tail", "50"])
     assert calls == [
         ("GET", "/api/v1/apps/heldso/deploy", None),
         ("GET", "/api/v1/logs?lines=50&container=deploy-heldso&since=-1h", None),
@@ -1665,7 +1666,7 @@ def test_app_logs_follow_streams(monkeypatch: pytest.MonkeyPatch):
     seen = []
     monkeypatch.setattr(cli, "_stream_get", lambda client, path: seen.append(path))
     _env(monkeypatch)
-    main(["app", "logs", "-f", "--app", "heldso", "--container", "heldso-worker-1", "--text"])
+    main(["app", "logs", "-f", "--app", "heldso", "--container", "heldso-worker-1"])
     assert seen == ["/api/v1/logs?lines=100&container=heldso-worker-1&follow=1"]
 
 
@@ -1673,8 +1674,8 @@ def test_logs_by_name_or_id(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
     calls = []
     monkeypatch.setattr(cli, "_api_try", lambda *a, **k: calls.append(a[2]) or (200, "x\n"))
     _env(monkeypatch)
-    main(["logs", "yard-caddy-1", "--tail", "10", "--text"])
-    main(["logs", "abc123def456", "--text"])
+    main(["logs", "yard-caddy-1", "--tail", "10"])
+    main(["logs", "abc123def456"])
     assert calls == [
         "/api/v1/logs?lines=10&container=yard-caddy-1",
         "/api/v1/logs?lines=100&container=abc123def456",
@@ -1685,7 +1686,7 @@ def test_logs_sends_hide_and_only(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     calls = []
     monkeypatch.setattr(cli, "_api_try", lambda *a, **k: calls.append(a[2]) or (200, "x\n"))
     _env(monkeypatch)
-    main(["logs", "heldso-app-1", "--hide", "a=b", "--hide", "noise", "--only", "status=error", "--text"])
+    main(["logs", "heldso-app-1", "--hide", "a=b", "--hide", "noise", "--only", "status=error"])
     assert calls == ["/api/v1/logs?lines=100&container=heldso-app-1&hide=a%3Db&hide=noise&only=status%3Derror"]
 
 
@@ -1710,7 +1711,7 @@ def test_events_build_the_query(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["events", "--app", "heldso", "--source", "podman", "--since", "-1h", "--text"])
+    main(["events", "--app", "heldso", "--source", "podman", "--since", "-1h"])
     assert calls[-1] == ("GET", "/api/v1/events?lines=200&since=-1h&app=heldso&source=podman", None)
     out = capsys.readouterr().out
     assert "died" in out and "heldso-app-1 abc123def456" in out and "exit 1" in out
@@ -1750,7 +1751,7 @@ def test_app_new_image(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFi
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
     monkeypatch.setattr(cli, "_follow_deploy", lambda *a: {"status": "ok"})
-    main(["app", "new", "--runs", "ghcr.io/you/api:1.4", "--text"])
+    main(["app", "new", "--runs", "ghcr.io/you/api:1.4"])
     method, path, body = sent[0]
     assert body["name"] == "api"
     assert body["repo"] == ""
@@ -1779,7 +1780,6 @@ def test_app_new_recipe_caddy_port(monkeypatch: pytest.MonkeyPatch, capsys: pyte
             "https://example.com/umami.yml",
             "--caddy",
             "umami.example.com",
-            "--text",
         ]
     )
     site = next(call for call in sent if call[0] == "PUT")
@@ -1795,7 +1795,7 @@ def test_app_set_runs_push_message(monkeypatch: pytest.MonkeyPatch, capsys: pyte
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "set", "--app", "db", "--runs", "postgres:17", "--text"])
+    main(["app", "set", "--app", "db", "--runs", "postgres:17"])
     out = capsys.readouterr().out
     assert "The next check deploys it within 5 minutes" in out
 
@@ -1808,7 +1808,7 @@ def test_app_set_runs_manual_message(monkeypatch: pytest.MonkeyPatch, capsys: py
 
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
-    main(["app", "set", "--app", "db", "--runs", "postgres:17", "--text"])
+    main(["app", "set", "--app", "db", "--runs", "postgres:17"])
     out = capsys.readouterr().out
     assert "still runs the old way until the next deploy" in out
     assert "Deploy now: yard app deploy --app db" in out
@@ -1834,7 +1834,7 @@ def _new_web(monkeypatch: pytest.MonkeyPatch, sent: list, port: int, deploy_code
     _env(monkeypatch)
 
 
-NEW_WEB = ["app", "new", "--text", "--repo", "https://origin.cursor.com/org/web", "--caddy", "web.example.com"]
+NEW_WEB = ["app", "new", "--repo", "https://origin.cursor.com/org/web", "--caddy", "web.example.com"]
 
 
 def test_app_new_caddy_writes_the_exposed_port(monkeypatch: pytest.MonkeyPatch):
@@ -1859,7 +1859,7 @@ def test_app_new_caddy_image_without_a_port_prints_the_template(monkeypatch: pyt
     sent: list = []
     _new_web(monkeypatch, sent, 0)
     with pytest.raises(SystemExit) as caught:
-        main(["app", "new", "--text", "--runs", "postgres:17", "--app", "web", "--caddy", "web.example.com"])
+        main(["app", "new", "--runs", "postgres:17", "--app", "web", "--caddy", "web.example.com"])
     assert caught.value.code == 1
     assert _site_calls(sent) == []
     err = capsys.readouterr().err
@@ -1906,7 +1906,7 @@ def _new_env_fakes(monkeypatch, sent):
 def test_app_new_env_flag_puts_the_env(monkeypatch: pytest.MonkeyPatch):
     sent = []
     _new_env_fakes(monkeypatch, sent)
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "-e", "B=two"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "-e", "B=two"])
     put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
     assert put[2] == {"A": "1", "B": "two"}
     assert sent.index(put) < sent.index(next(c for c in sent if c[1].endswith("/deploy")))
@@ -1917,7 +1917,7 @@ def test_app_new_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     dotenv = tmp_path / "x.env"
     dotenv.write_text("A=from-file\nB=file-two\n")
     _new_env_fakes(monkeypatch, sent)
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "--env-file", str(dotenv)])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "--env-file", str(dotenv)])
     put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
     assert put[2] == {"A": "from-file", "B": "file-two"}
 
@@ -1931,7 +1931,6 @@ def test_app_new_env_merge_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
         [
             "app",
             "new",
-            "--text",
             "--repo",
             "https://origin.cursor.com/org/x",
             "--env-file",
@@ -1949,7 +1948,7 @@ def test_app_new_env_edit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     _new_env_fakes(monkeypatch, sent)
     monkeypatch.setattr(sys, "stdin", _TTY())
     monkeypatch.setattr(cli, "_edit_text", lambda text: "A=edited\n")
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "--edit-env"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "--edit-env"])
     put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
     assert put[2] == {"A": "edited"}
 
@@ -1969,7 +1968,7 @@ def test_app_new_edit_env_starts_from_the_checkout_template(
         return text.replace("SECRET=", "SECRET=s3")
 
     monkeypatch.setattr(cli, "_edit_text", fake_edit)
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "--edit-env"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1", "--edit-env"])
     assert shown == ["A=1\n\n# Secrets\nSECRET=\n# OPT=x\nMODEL=small\n"]
     put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
     assert put[2] == {"A": "1", "SECRET": "s3", "MODEL": "small"}
@@ -1986,7 +1985,7 @@ def test_app_new_edit_env_takes_a_path_and_drops_empty_keys(
     (tmp_path / "prod.env").write_text("KEY=\nMODEL=big\n")
     monkeypatch.setattr(sys, "stdin", _TTY())
     monkeypatch.setattr(cli, "_edit_text", lambda text: text)
-    main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "--edit-env", "prod.env"])
+    main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "--edit-env", "prod.env"])
     put = next(c for c in sent if c[0] == "PUT" and c[1].endswith("/env"))
     assert put[2] == {"MODEL": "big"}
     err = capsys.readouterr().err
@@ -1999,7 +1998,7 @@ def test_app_new_edit_env_missing_path_fails_before_post(monkeypatch: pytest.Mon
     _new_env_fakes(monkeypatch, sent)
     monkeypatch.setattr(sys, "stdin", _TTY())
     with pytest.raises(SystemExit):
-        main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "--edit-env", str(tmp_path / "no")])
+        main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "--edit-env", str(tmp_path / "no")])
     assert sent == []
 
 
@@ -2007,7 +2006,7 @@ def test_app_new_bad_env_fails_before_post(monkeypatch: pytest.MonkeyPatch):
     sent = []
     _new_env_fakes(monkeypatch, sent)
     with pytest.raises(SystemExit):
-        main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "-e", "NOTAPAIR"])
+        main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "-e", "NOTAPAIR"])
     assert sent == []
 
 
@@ -2028,7 +2027,6 @@ def test_app_new_failed_first_deploy_exits_1(monkeypatch: pytest.MonkeyPatch, ca
             [
                 "app",
                 "new",
-                "--text",
                 "--repo",
                 "https://origin.cursor.com/org/web",
                 "--caddy",
@@ -2053,7 +2051,7 @@ def test_app_new_env_put_failure_dies_cleanly(monkeypatch: pytest.MonkeyPatch, c
     monkeypatch.setattr(cli, "_api_try", fake_api_try)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "new", "--text", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1"])
+        main(["app", "new", "--repo", "https://origin.cursor.com/org/x", "-e", "A=1"])
     err = capsys.readouterr().err
     assert "x was created, but its env was not saved" in err
     assert "yard env edit --app x" in err
@@ -2084,7 +2082,7 @@ def test_repo_new(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytes
     seen: list = []
     monkeypatch.setattr(cli, "_api_try", _repo_api(seen, repo=bare))
     _env(monkeypatch)
-    main(["repo", "new", "--text"])
+    main(["repo", "new"])
     # The server picks the forge and the owner.
     assert seen == [("POST", "/api/v1/repos", {"name": "work"})]
     remote = subprocess.check_output(["git", "-C", str(repo), "remote", "get-url", "origin"], text=True).strip()
@@ -2123,7 +2121,7 @@ def test_repo_new_die_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cap
         monkeypatch.chdir(tmp_path)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["repo", "new", "--text"])
+        main(["repo", "new"])
     err = capsys.readouterr().err
     for text in texts:
         assert text in err
@@ -2136,7 +2134,7 @@ def test_repo_new_a_push_failure_keeps_origin(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(cli.subprocess, "run", _fake_push(pushes, ok=False))
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["repo", "new", "--text"])
+        main(["repo", "new"])
     err = capsys.readouterr().err
     assert "the push failed" in err
     assert "git push -u origin main" in err
@@ -2151,7 +2149,7 @@ def test_repo_new_warns_about_uncommitted_changes(monkeypatch: pytest.MonkeyPatc
     (repo / "dirty.txt").write_text("dirty\n")
     monkeypatch.setattr(cli, "_api_try", _repo_api(repo=bare))
     _env(monkeypatch)
-    main(["repo", "new", "--text"])
+    main(["repo", "new"])
     assert "warning: uncommitted changes are not pushed" in capsys.readouterr().err
 
 
@@ -2170,7 +2168,7 @@ def test_repo_new_passes_the_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     seen: list = []
     monkeypatch.setattr(cli, "_api_try", _repo_api(seen, repo=bare))
     _env(monkeypatch)
-    main(["repo", "new", "heldso", "--owner", "apps", "--forge", "origin", "--text"])
+    main(["repo", "new", "heldso", "--owner", "apps", "--forge", "origin"])
     assert seen == [("POST", "/api/v1/repos", {"name": "heldso", "owner": "apps", "forge": "origin"})]
 
 
@@ -2178,7 +2176,7 @@ def test_app_new_no_repo_names_repo_new(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _work_checkout(monkeypatch, tmp_path)
     _env(monkeypatch)
     with pytest.raises(SystemExit):
-        main(["app", "new", "--text"])
+        main(["app", "new"])
     err = capsys.readouterr().err
     assert "no repo" in err
     assert "yard repo new" in err
