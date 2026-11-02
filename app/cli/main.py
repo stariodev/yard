@@ -1,6 +1,7 @@
 """The `yard` argument tree and the entry point. One function per command; `main` dispatches."""
 
 import argparse
+import getpass
 import html
 import http.server
 import json
@@ -1004,17 +1005,6 @@ def _ask_key(key_flag: str) -> str:
         return pem
 
 
-def _pending_setup(path: Path, url: str) -> dict:
-    """A saved github setup for this host, or an empty dict."""
-    try:
-        raw = json.loads(path.read_text())
-    except OSError, json.JSONDecodeError:
-        return {}
-    if not isinstance(raw, dict) or raw.get("url") != url:
-        return {}
-    return raw if isinstance(raw.get("secret"), str) else {}
-
-
 def _setup_origin(session: Client, args: argparse.Namespace) -> None:
     """Connect to Cursor Origin: the host makes the key, the user makes the app."""
     key = _forge_row(session, "origin").get("public_key")
@@ -1044,18 +1034,17 @@ def _setup_origin(session: Client, args: argparse.Namespace) -> None:
     events = app.get("events")
     if isinstance(events, list) and "repository.pushed" not in events:
         print("warning: the app does not subscribe to repository.pushed", file=sys.stderr)
-    print("Install the app on your account and select all repositories.")
-    _open(
+    _install(
+        session,
         args,
+        "origin",
         "https://cursor.com/codebase/apps/install?"
         + urlencode({"client_id": app_id, "scope": "repository:contents:read namespace:repositories:create"}),
     )
-    _poll_installation(session, "origin")
-    print("Done.")
 
 
 def _setup_github(session: Client, args: argparse.Namespace) -> None:
-    """Connect to GitHub: shared checks, then the manifest form or --manual."""
+    """Connect to GitHub: shared checks, then the manifest form or the values of an existing app."""
     parts = urlsplit(session.url)
     if parts.scheme == "http" and parts.hostname not in {"127.0.0.1", "::1", "localhost"}:
         _die("refusing to send the private key over http; log in with an https url")
@@ -1074,21 +1063,42 @@ def _setup_github(session: Client, args: argparse.Namespace) -> None:
         if slug:
             print(f"Add another account: https://github.com/apps/{slug}/installations/new")
         return
-    if forge.get("app_id") and not forge.get("installations"):
+    if forge.get("app_id") and not forge.get("installations") and not _existing(args):
         print(f"App {forge['app_id']} is already set up.")
-        print("Install the app on your account and select all repositories.")
-        slug = str(forge.get("slug") or "")
-        if slug:
-            _open(args, f"https://github.com/apps/{slug}/installations/new")
-        else:
-            print("Install it from https://github.com/settings/installations")
-        _poll_installation(session, "github")
-        print("Done.")
+        _install(session, args, "github", _github_install_url(str(forge.get("slug") or "")))
         return
-    if args.manual:
-        _setup_github_manual(session, args)
+    if _existing(args):
+        _setup_github_existing(session, args)
     else:
         _setup_github_manifest(session, args)
+
+
+def _existing(args: argparse.Namespace) -> bool:
+    """The values of an app made before: --existing, or any of its flags."""
+    return bool(args.existing or args.app_id or args.webhook_secret)
+
+
+def _github_install_url(slug: str) -> str:
+    return f"https://github.com/apps/{slug}/installations/new" if slug else "https://github.com/settings/installations"
+
+
+def _install(session: Client, args: argparse.Namespace, forge: str, url: str) -> None:
+    """The last step of every setup: open the install page, then wait for the installation."""
+    print("Install the app on your account and select all repositories.")
+    _open(args, url)
+    _poll_installation(session, forge)
+    print("Done.")
+
+
+def _read_pem(path: str) -> str:
+    """The PEM at a --key path, or "" when the path is empty or holds no key; the prompt then asks."""
+    if not path:
+        return ""
+    try:
+        pem = Path(_normalize_path(path)).read_text()
+    except OSError:
+        return ""
+    return pem if "-----BEGIN" in pem else ""
 
 
 def _pending_manifest(path: Path, url: str) -> dict:
@@ -1110,7 +1120,8 @@ def _manifest_page(session: Client, args: argparse.Namespace, base: str, state: 
         "url": session.url,
         "hook_attributes": {"url": f"{session.url}/hooks/github", "active": True},
         "redirect_url": f"{base}/callback",
-        "public": False,
+        # A private app installs only on the account that owns it; a public one on any account.
+        "public": bool(args.public),
         "default_permissions": {
             "contents": "write",
             "metadata": "read",
@@ -1279,70 +1290,27 @@ def _setup_github_manifest(session: Client, args: argparse.Namespace) -> None:
     else:
         app = _manifest_run(session, args, pending_path)
     saved = _save_github_app(session, app, pending_path)
-    slug = str(app.get("slug") or saved.get("slug") or "")
-    html_url = str(app.get("html_url") or "")
-    print("Install the app on your account and select all repositories.")
-    _open(
-        args,
-        f"{html_url}/installations/new" if html_url else f"https://github.com/apps/{slug}/installations/new",
-    )
-    _poll_installation(session, "github")
-    print("Done.")
+    _install(session, args, "github", _github_install_url(str(app.get("slug") or saved.get("slug") or "")))
 
 
-def _setup_github_manual(session: Client, args: argparse.Namespace) -> None:
-    """Connect to GitHub: the key and the webhook secret come from the user."""
-    pending_path = config_path().parent / "github-setup.json"
-    pending = {} if args.new else _pending_setup(pending_path, session.url)
-    secret = str(pending.get("secret")) if pending else secrets.token_hex(32)
-    print(f"webhook url: {session.url}/hooks/github")
-    print("event: push")
-    print("permission: contents write, repository creation write")
-    print(f"webhook secret: {secret}")
-    print("Paste this as the webhook secret.")
-    print()
-    host = urlsplit(session.url).hostname or "host"
-    base = (
-        f"https://github.com/organizations/{quote(str(args.org))}/settings/apps/new"
-        if args.org
-        else "https://github.com/settings/apps/new"
-    )
-    link = (
-        base
-        + "?"
-        + urlencode(
-            {
-                "name": f"yard-{host}",
-                "url": session.url,
-                "public": "false",
-                "webhook_active": "true",
-                "webhook_url": f"{session.url}/hooks/github",
-                "contents": "write",
-                "repository_creation": "write",
-                "events[]": "push",
-            }
-        )
-    )
-    if pending:
-        print(
-            f"Continuing the setup from {pending.get('created') or 'an earlier run'}."
-            " If you already created the GitHub App, do not create another: paste its App ID."
-        )
-        print(link)
-    else:
-        created = datetime.now(UTC).isoformat(timespec="seconds")
-        atomic_write(
-            pending_path,
-            json.dumps({"url": session.url, "secret": secret, "created": created}, indent=2) + "\n",
-        )
-        _open(args, link)
-
+def _setup_github_existing(session: Client, args: argparse.Namespace) -> None:
+    """An app made before, or a manifest run that broke: the user gives its ID, key, and webhook secret."""
+    print(f"The app needs the webhook url {session.url}/hooks/github, the push event,")
+    print("and the permissions contents write and repository creation write.")
+    app_id = str(args.app_id)
+    secret = str(args.webhook_secret)
+    pem = _read_pem(str(args.key))
     while True:
-        app_id = _ask("App ID: ")
-        if not app_id.isdigit():
-            print("That is not an app ID. It is digits.", file=sys.stderr)
-            continue
-        pem = _ask_key(str(args.key))
+        while not app_id.isdigit():
+            if app_id:
+                print("That is not an app ID. It is digits.", file=sys.stderr)
+            app_id = _ask("App ID: ")
+        pem = pem or _ask_key(str(args.key))
+        while not secret:
+            try:
+                secret = getpass.getpass("Webhook secret: ").strip()
+            except EOFError, KeyboardInterrupt:
+                _die("stopped; run the command again to continue")
         code, text = _api_try(
             session,
             "PUT",
@@ -1350,21 +1318,16 @@ def _setup_github_manual(session: Client, args: argparse.Namespace) -> None:
             {"app_id": app_id, "private_key": pem, "webhook_secret": secret},
         )
         if 400 <= code < 500:
+            # Yard checks the key against GitHub before it saves. Ask for every value again.
             print(text if _json else explain(text), file=sys.stderr)
+            app_id, pem, secret = "", "", ""
             continue
         if code >= 300:
             _die(text if _json else explain(text))
-        wrap = _object(text)
         break
-    pending_path.unlink(missing_ok=True)
+    wrap = _object(text)
     app = wrap.get("app") if isinstance(wrap, dict) else None
-    if not isinstance(app, dict):
-        app = {}
-    slug = str(app.get("slug") or "<slug>")
-    print("Install the app on your account and select all repositories.")
-    _open(args, f"https://github.com/apps/{slug}/installations/new")
-    _poll_installation(session, "github")
-    print("Done.")
+    _install(session, args, "github", _github_install_url(str((app or {}).get("slug") or "")))
 
 
 def _open(args: argparse.Namespace, url: str) -> None:
@@ -1611,13 +1574,18 @@ def _forge_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentPar
 
     setup = subs.add_parser("setup", help="connect this host to a forge", parents=[common])
     setup.add_argument("forge", choices=["origin", "github"], help="the forge")
-    setup.add_argument("--key", default="", help="the GitHub app private key PEM")
-    setup.add_argument("--manual", action="store_true", help="paste an App ID and key instead of the one-click form")
     setup.add_argument("--org", default="", help="create the GitHub app in this organization")
+    setup.add_argument("--public", action="store_true", help="create a GitHub app that any account can install")
     setup.add_argument(
-        "--no-browser", action="store_true", help="print the links; open nothing (no browser here: use --manual)"
+        "--existing", action="store_true", help="connect a GitHub app you already have: its ID, key, and secret"
     )
-    setup.add_argument("--new", action="store_true", help="start the GitHub setup over with a fresh secret")
+    setup.add_argument("--app-id", default="", help="the ID of an existing GitHub app")
+    setup.add_argument("--key", default="", help="the private key PEM of an existing GitHub app")
+    setup.add_argument("--webhook-secret", default="", help="the webhook secret of an existing GitHub app")
+    setup.add_argument(
+        "--no-browser", action="store_true", help="print the links; open nothing (no browser here: use --existing)"
+    )
+    setup.add_argument("--new", action="store_true", help="replace a connected GitHub app; drop a pending setup")
     setup.set_defaults(func=_cmd_forge_setup)
 
 
