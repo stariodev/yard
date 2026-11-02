@@ -8,7 +8,7 @@ import pytest
 from app.server import status
 from app.server.store import App, Deployed, Store
 from app.server.yard import Yard
-from tests.server.conftest import FakeCaddy, FakePodman, make_config, make_yard
+from tests.server.conftest import FakeCaddy, FakePodman, make_yard
 
 
 def _yard(tmp_path: Path, ps: list[dict], stats: str = "[]", *, sock: bool = False, logs: str = "") -> Yard:
@@ -177,9 +177,8 @@ def test_url_row_shows_the_record_revision(tmp_path):
     app = Store.open(tmp_path).create_app("umami", "", runs="https://example.com/umami.yml")
     revision = "sha256:" + "b" * 64
     plan = status.running_plan(app, _listed(_deploy("umami", revision, runs=app.runs, kind="compose")))
-    config = make_config(tmp_path)
     item = Container(name="umami-app-1", image="postgres:17", app="umami", running=True, state="running")
-    row = status._row(config, item, app, None, Tip(revision="sha256:" + "c" * 64), plan, None, [], {})
+    row = status._row(item, app, None, Tip(revision="sha256:" + "c" * 64), plan, None, [], {}, 0)
     assert row.sha == revision
     assert row.tip == "sha256:" + "c" * 64
 

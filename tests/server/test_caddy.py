@@ -452,3 +452,18 @@ async def test_real_caddy_moves_from_the_binds_with_no_gap():
         assert caddy_hosts(live) == ["b.localhost"]
         saved = json.loads((root / "xdg" / "caddy" / "autosave.json").read_text())
         assert caddy_hosts(saved) == ["b.localhost"]
+
+
+async def test_list_hosts_adapts_each_file_once(tmp_path: Path):
+    yard = make_yard(tmp_path)
+    fake = FakeCaddy()
+    yard.caddy = fake
+    path = yard.config.site("heldso")
+    path.parent.mkdir(parents=True)
+    path.write_text("heldso.example.com {\n}\n")
+    assert await sites.list_hosts(yard, "heldso") == ["heldso.example.com"]
+    assert await sites.list_hosts(yard, "heldso") == ["heldso.example.com"]
+    assert [call[1] for call in fake.calls] == ["/adapt"]
+    path.write_text("heldso.example.com, www.heldso.example.com {\n}\n")
+    assert await sites.list_hosts(yard, "heldso") == ["heldso.example.com", "www.heldso.example.com"]
+    assert await sites.list_hosts(yard, "other") == []

@@ -1,6 +1,9 @@
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.server.podman import (
+    Podman,
     parse_health,
     parse_images,
     parse_info,
@@ -145,3 +148,11 @@ def test_parse_port():
     assert parse_port('[{"Config": {"ExposedPorts": {"3001/tcp": {}}}}]') == 3001
     assert parse_port('[{"Config": {"ExposedPorts": {"3001/tcp": {}, "80/tcp": {}}}}]') == 0
     assert parse_port("[]") == 0
+
+
+async def test_stream_calls_on_line_in_order(tmp_path: Path):
+    lines: list[str] = []
+    script = tmp_path / "fake.py"
+    script.write_text("import sys\nprint('one', flush=True)\nprint('two', file=sys.stderr, flush=True)\nsys.exit(3)\n")
+    code, text = await Podman(sys.executable).stream(str(script), on_line=lines.append)
+    assert code == 3 and lines == ["one", "two"] and text == "one\ntwo\n"
