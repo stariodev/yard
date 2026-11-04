@@ -16,6 +16,7 @@ from app.server.forges import GitHub, Origin
 from app.server.yard import Yard
 from app.shared import YardError, now
 from tests.server.conftest import FakeCaddy, FakePodman, dead_podman, make_yard
+from tests.server.fakes import fake_program
 
 CADDY_PS = (
     '[{"Names":["yard-caddy-1"],"State":"running",'
@@ -45,8 +46,7 @@ def _yard(
 ) -> Yard:
     (tmp_path / "journal").mkdir(exist_ok=True)
     journalctl = tmp_path / "journalctl"
-    journalctl.write_text("#!/bin/sh\nexit 0\n")
-    journalctl.chmod(0o755)
+    fake_program(journalctl, lambda _argv: (b"", b"", 0))
     yard = make_yard(
         tmp_path,
         podman_bin="podman",
@@ -505,7 +505,9 @@ def test_doctor_one_installation_row_per_account(tmp_path: Path, monkeypatch: py
 
 
 def test_doctor_flags_a_missing_journal(tmp_path: Path):
-    yard = make_yard(tmp_path, podman_bin="podman", boot=True)
+    # The fake Podman and Caddy: only the journal is missing.
+    yard = _yard(tmp_path, ps=CADDY_PS)
+    (tmp_path / "journal").rmdir()
     found = _run(yard)
     assert found["journal"]["ok"] is False
     assert "no journal" in found["journal"]["detail"]

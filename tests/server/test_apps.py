@@ -867,7 +867,7 @@ async def test_check_repo_debounces(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
     _connect(monkeypatch)
     # The window must outlast one check: each check also asks Podman for the deploy record.
-    monkeypatch.setattr(apps, "_DEBOUNCE", 0.5)
+    monkeypatch.setattr(apps, "_DEBOUNCE", 0.1)
     seen: list[str] = []
 
     async def fake_tip(clone, url, ref, token=""):
@@ -879,7 +879,7 @@ async def test_check_repo_debounces(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     await apps.check_repo(yard, "https://origin.cursor.com/org/app")
     await apps.check_repo(yard, "https://origin.cursor.com/org/app")
     assert seen == ["tip"]
-    await asyncio.sleep(0.7)
+    await asyncio.sleep(0.2)
     assert seen == ["tip", "tip"]
 
 

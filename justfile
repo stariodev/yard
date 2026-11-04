@@ -16,7 +16,7 @@ check:
     uv run ruff check .
     uv run ruff format --check .
     uv run pyrefly check
-    uv run pytest -q
+    uv run pytest -q -n auto
 
 # auto-fix lint and format
 fix:
@@ -25,7 +25,7 @@ fix:
 
 # run the tests
 test:
-    uv run pytest -q
+    uv run pytest -q -n auto
 
 # refresh the pinned template base digests in detect/bases.json
 bump-bases:

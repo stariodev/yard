@@ -10,11 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from app.server import journal
+from app.server import journal, logfilter
 from app.server.store import Config
 from app.shared import YardError
 from tests.conftest import auth, serve
 from tests.server.conftest import make_config
+from tests.server.fakes import fake_program
 
 WHEN = datetime(2025, 10, 5, 21, 0, 0, tzinfo=UTC)
 MICROS = str(int(WHEN.timestamp() * 1_000_000))
@@ -69,26 +70,41 @@ def _config(tmp_path: Path, journalctl: Path, journal_socket: Path | None = None
     )
 
 
-def _journalctl(tmp_path: Path, *, out: str = "", err: str = "", code: int = 0) -> tuple[Path, Path]:
-    """A fake journalctl. It records argv and prints canned output."""
+def _journalctl(
+    tmp_path: Path, *, out: str = "", err: str = "", code: int = 0, real: bool = False
+) -> tuple[Path, Path]:
+    """A fake journalctl. It records argv and prints the out and err files, read at each call.
+
+    `real` writes it as a shell script that runs as a process.
+    """
     argv_log = tmp_path / "argv"
     script = tmp_path / "journalctl"
-    script.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$@" > "{argv_log}"\n'
-        f'cat "{tmp_path / "out"}" 2>/dev/null\n'
-        f'cat "{tmp_path / "err"}" >&2 2>/dev/null\n'
-        f"exit {code}\n"
-    )
-    script.chmod(0o755)
-    (tmp_path / "out").write_text(out)
-    (tmp_path / "err").write_text(err)
+    out_file, err_file = tmp_path / "out", tmp_path / "err"
+    out_file.write_text(out)
+    err_file.write_text(err)
     (tmp_path / "journal").mkdir()
+    if real:
+        script.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$@" > "{argv_log}"\n'
+            f'cat "{out_file}" 2>/dev/null\n'
+            f'cat "{err_file}" >&2 2>/dev/null\n'
+            f"exit {code}\n"
+        )
+        script.chmod(0o755)
+        return script, argv_log
+
+    def run(argv: list[str]) -> tuple[bytes, bytes, int]:
+        argv_log.write_text("".join(arg + "\n" for arg in argv))
+        return out_file.read_bytes(), err_file.read_bytes(), code
+
+    fake_program(script, run)
     return script, argv_log
 
 
 async def test_read_builds_the_argv(tmp_path: Path):
-    script, argv_log = _journalctl(tmp_path, out=ENTRY + "\n" + BYTES + "\n" + "not json\n")
+    # One real process: the other tests use the in-process fake.
+    script, argv_log = _journalctl(tmp_path, out=ENTRY + "\n" + BYTES + "\n" + "not json\n", real=True)
     config = _config(tmp_path, script)
     text = await journal.read(
         config,
@@ -296,63 +312,57 @@ async def test_logs_follow_streams(yard_journal):
     assert "-f" in argv_log.read_text().splitlines()
 
 
-_CURSOR_JOURNALCTL = """\
-import json
-import sys
-
-argv = sys.argv[1:]
-with open({argv_log!r}, "a") as log:
-    log.write(" ".join(argv) + "\\n")
-
-lines, after, matches = "", "", []
-pos = 0
-while pos < len(argv):
-    arg = argv[pos]
-    if arg in ("-D", "-o", "--since", "--until"):
-        pos += 2
-    elif arg in ("-n", "--lines"):
-        lines, pos = argv[pos + 1], pos + 2
-    elif arg == "--after-cursor":
-        after, pos = argv[pos + 1], pos + 2
-    elif arg == "-f":
-        pos += 1
-    else:
-        matches.append(arg)
-        pos += 1
-
-# "+" splits OR groups; in a group one field is OR over its values and the fields are AND.
-groups = [{{}}]
-for match in matches:
-    if match == "+":
-        groups.append({{}})
-        continue
-    field, _, value = match.partition("=")
-    groups[-1].setdefault(field, set()).add(value)
-entries = [
-    entry
-    for entry in (json.loads(line) for line in open({data!r}) if line.strip())
-    if any(all(str(entry.get(field) or "") in values for field, values in want.items()) for want in groups)
-]
-if after:
-    found = [i for i, entry in enumerate(entries) if str(entry.get("__CURSOR") or "") == after]
-    entries = entries[found[0] + 1 :] if found else entries
-if lines and lines != "all":
-    count = int(lines.lstrip("+"))
-    entries = entries[:count] if lines.startswith("+") else entries[-count:]
-for entry in entries:
-    print(json.dumps(entry))
-"""
+def _cursor_output(argv: list[str], entries: list[dict]) -> str:
+    """What journalctl prints for argv: matches, --after-cursor, and -n [+]N."""
+    lines, after, matches = "", "", []
+    pos = 0
+    while pos < len(argv):
+        arg = argv[pos]
+        if arg in ("-D", "-o", "--since", "--until"):
+            pos += 2
+        elif arg in ("-n", "--lines"):
+            lines, pos = argv[pos + 1], pos + 2
+        elif arg == "--after-cursor":
+            after, pos = argv[pos + 1], pos + 2
+        elif arg == "-f":
+            pos += 1
+        else:
+            matches.append(arg)
+            pos += 1
+    # "+" splits OR groups; in a group one field is OR over its values and the fields are AND.
+    groups: list[dict[str, set[str]]] = [{}]
+    for match in matches:
+        if match == "+":
+            groups.append({})
+            continue
+        field, _, value = match.partition("=")
+        groups[-1].setdefault(field, set()).add(value)
+    found = [
+        entry
+        for entry in entries
+        if any(all(str(entry.get(field) or "") in values for field, values in want.items()) for want in groups)
+    ]
+    if after:
+        at = [i for i, entry in enumerate(found) if str(entry.get("__CURSOR") or "") == after]
+        found = found[at[0] + 1 :] if at else found
+    if lines and lines != "all":
+        count = int(lines.lstrip("+"))
+        found = found[:count] if lines.startswith("+") else found[-count:]
+    return "".join(json.dumps(entry) + "\n" for entry in found)
 
 
 def _cursor_journalctl(tmp_path: Path, entries: list[dict]) -> tuple[Path, Path]:
     """A fake journalctl that honors matches, --after-cursor, and -n [+]N."""
-    data = tmp_path / "journal.jsonl"
-    data.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
     argv_log = tmp_path / "argv"
     script = tmp_path / "journalctl"
-    script.write_text(f"#!{sys.executable}\n" + _CURSOR_JOURNALCTL.format(argv_log=str(argv_log), data=str(data)))
-    script.chmod(0o755)
     (tmp_path / "journal").mkdir()
+
+    def run(argv: list[str]) -> tuple[bytes, bytes, int]:
+        with argv_log.open("a") as log:
+            log.write(" ".join(argv) + "\n")
+        return _cursor_output(argv, entries).encode(), b"", 0
+
+    fake_program(script, run)
     return script, argv_log
 
 
@@ -835,7 +845,12 @@ for line in lines[1:]:
 
 @pytest.fixture
 async def yard_trickle(tmp_path, monkeypatch):
-    """The API over a journalctl that emits entries with a delay between them."""
+    """The API over a journalctl that emits entries with a delay between them.
+
+    A held trace expires after 0.2 s here, and the lines come 0.05 s apart, so
+    the trace ages out mid-stream as it does after 2 s in production.
+    """
+    monkeypatch.setattr(logfilter, "_HOLD_SECONDS", 0.2)
     micros = int(WHEN.timestamp() * 1_000_000)
     entries = [
         {
@@ -856,7 +871,7 @@ async def yard_trickle(tmp_path, monkeypatch):
     argv_log = tmp_path / "argv"
     script = tmp_path / "journalctl"
     script.write_text(
-        f"#!{sys.executable}\n" + _TRICKLE_JOURNALCTL.format(argv_log=str(argv_log), data=str(data), delay=0.45)
+        f"#!{sys.executable}\n" + _TRICKLE_JOURNALCTL.format(argv_log=str(argv_log), data=str(data), delay=0.05)
     )
     script.chmod(0o755)
     (tmp_path / "journal").mkdir()
