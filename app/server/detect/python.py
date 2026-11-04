@@ -53,6 +53,8 @@ def plan(repo: Repo, name: str, *, reason: str) -> Plan:
     # writes only the source layer. uv is bind-mounted and never lands in the image.
     if repo.exists("uv.lock"):
         answer = "yard:python-uv"
+        # uv installs the project when tool.uv.package says so, else when there is a build-system.
+        packaged = repo.pyproject.get("tool", {}).get("uv", {}).get("package", bool(repo.pyproject.get("build-system")))
         uv = f"--mount=type=bind,from={pin('ghcr.io/astral-sh/uv:0.13.5')},source=/uv,target=/bin/uv"
         install = {
             "env": " \\\n    UV_COMPILE_BYTECODE=1 \\\n    UV_LINK_MODE=copy \\\n    UV_PYTHON_DOWNLOADS=0",
@@ -63,10 +65,10 @@ def plan(repo: Repo, name: str, *, reason: str) -> Plan:
                 "    --mount=type=bind,source=uv.lock,target=uv.lock \\\n"
                 "    uv sync --locked --no-install-project --no-dev"
             ),
-            # Only a packaged project installs itself; it runs after every code change.
+            # Only a packaged project installs itself; this step runs after every code change.
             "project": (
                 f"\nRUN {uv} \\\n    --mount=type=cache,target=/root/.cache/uv \\\n    uv sync --locked --no-dev\n"
-                if repo.pyproject.get("build-system")
+                if packaged
                 else ""
             ),
         }

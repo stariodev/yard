@@ -111,7 +111,7 @@ def test_python_requirements(tmp_path: Path):
     assert resolved.answer == "yard:python-pip"
     assert resolved.reason == "python: requirements.txt"
     assert "pip install -r requirements.txt" in resolved.generated
-    assert " AS " not in resolved.generated
+    assert resolved.generated.count("\nFROM ") == 1
     assert 'CMD ["python", "app.py"]' in resolved.generated
 
 
@@ -125,7 +125,7 @@ def test_python_uv_and_entrypoint_order(tmp_path: Path):
     assert resolved.reason == "python: uv.lock"
     assert "uv sync --locked --no-install-project --no-dev" in resolved.generated
     assert "uv sync --locked --no-dev" not in resolved.generated
-    assert " AS " not in resolved.generated
+    assert resolved.generated.count("\nFROM ") == 1
     assert 'CMD ["python", "-m", "app.main"]' in resolved.generated
     assert f"python:3.13-slim-trixie@{BASES['python:3.13-slim-trixie']}" in resolved.generated
 
@@ -258,6 +258,22 @@ def test_python_single_script_entrypoint(tmp_path: Path):
     assert 'CMD ["serve"]' in generated
     # A packaged project installs itself after the source copy.
     assert generated.index("COPY . /workspace") < generated.index("uv sync --locked --no-dev")
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "installs"),
+    [
+        ('[project]\nname="x"\n', False),
+        ('[project]\nname="x"\n[build-system]\nrequires=[]\n', True),
+        ('[project]\nname="x"\n[build-system]\nrequires=[]\n[tool.uv]\npackage=false\n', False),
+        ('[project]\nname="x"\n[tool.uv]\npackage=true\n', True),
+    ],
+)
+def test_python_uv_installs_a_packaged_project(tmp_path: Path, pyproject: str, installs: bool):
+    _write(tmp_path, "pyproject.toml", pyproject)
+    _write(tmp_path, "uv.lock", "lock")
+    _write(tmp_path, "main.py")
+    assert ("uv sync --locked --no-dev" in detect.resolve(tmp_path, "n").generated) is installs
 
 
 def test_stario_dep_matching(tmp_path: Path):
