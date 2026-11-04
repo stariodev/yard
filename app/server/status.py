@@ -214,11 +214,11 @@ def running_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
     return before if before.revision else _image_plan(app, listed)
 
 
-def last_try(listed: dict[str, Container], name: str) -> tuple[str, str]:
-    """The (revision, template) the last deploy tried, whatever its end."""
+def last_try(listed: dict[str, Container], name: str) -> tuple[str, str, str]:
+    """The (revision, template, runs) the last deploy tried, whatever its end."""
     item = listed.get(deploy_container(name))
     labels = item.labels if item else {}
-    return labels.get("sha", ""), labels.get("template", "")
+    return labels.get("sha", ""), labels.get("template", ""), labels.get("runs", "")
 
 
 def _labels_plan(labels: dict[str, str], prefix: str) -> Deployed:

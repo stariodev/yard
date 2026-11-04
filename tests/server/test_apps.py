@@ -806,6 +806,58 @@ async def test_a_waiting_deploy_keeps_the_running_job(tmp_path: Path):
     assert yard.deploys["heldso"] is not first
 
 
+async def test_a_new_runs_deploys_once_at_the_next_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`yard app set --runs ops/compose.yml` on a push app: the commit is the same, but the plan moved.
+
+    The next check deploys it. When that deploy fails, the check does not try the same plan again.
+    """
+    yard = make_yard(tmp_path)
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push", "ops/compose.yml")
+    _connect(monkeypatch)
+    deployed: list[str] = []
+
+    async def fake_tip(clone, url, ref, token=""):
+        return "same123"
+
+    async def fake_deploy(host, name, **_):
+        deployed.append(name)
+        return apps.Outcome("failed")
+
+    monkeypatch.setattr(git, "remote_tip", fake_tip)
+    monkeypatch.setattr(apps, "deploy", fake_deploy)
+    host = _Podman()
+    host.record("heldso", {"sha": "same123", "runs": "compose.yml", "kind": "compose"}, 0)
+    yard.podman = host
+    await apps.check_all(yard)
+    assert deployed == ["heldso"]
+
+    # The deploy of the new plan failed: the old plan still runs, and the tried one is not tried again.
+    labels = {"sha": "same123", "runs": "ops/compose.yml", "kind": "compose"}
+    host.record("heldso", {**labels, "before.revision": "same123", "before.runs": "compose.yml"}, 1)
+    await apps.check_all(yard)
+    assert deployed == ["heldso"]
+
+
+async def test_an_auto_app_ignores_the_resolved_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Auto records the answer it resolved; the check compares the commit only, as before."""
+    yard = make_yard(tmp_path)
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
+    _connect(monkeypatch)
+
+    async def fake_tip(clone, url, ref, token=""):
+        return "same123"
+
+    async def fake_deploy(host, name, **_):
+        raise AssertionError("no deploy")
+
+    monkeypatch.setattr(git, "remote_tip", fake_tip)
+    monkeypatch.setattr(apps, "deploy", fake_deploy)
+    host = _Podman()
+    host.record("heldso", {"sha": "same123", "runs": "compose.yml", "kind": "compose"}, 0)
+    yard.podman = host
+    await apps.check_all(yard)
+
+
 async def test_check_all_skips_an_unchanged_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")

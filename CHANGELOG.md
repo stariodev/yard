@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A check deploys a new explicit `runs` on a push app once, also when the commit stays the same. Before, a move from one path to another (`compose.yml` to `ops/compose.yml`) waited for the next commit, while `yard app set` said "The next check deploys it." A failed try of the new plan is not tried again. An auto app compares the commit only, as before. `yard app set --runs auto` on a push app no longer promises a check deploy: auto changes nothing until the next commit.
+
 - The `yard:python-uv` template sets `UV_COMPILE_BYTECODE`, `UV_LINK_MODE`, and `UV_PYTHON_DOWNLOADS` with `ARG`, not `ENV`. The build still uses them, but the running app no longer has them in its environment.
 - The Python templates (`yard:python-uv` and `yard:python-pip`) build in one stage. The venv layer stays cached until `uv.lock` or `requirements.txt` changes, so a code-only deploy writes only the source layer: 1.5 MB for honorata, where it wrote 148 MB before. Before, the final stage copied all of `/workspace` from a builder stage, so each deploy wrote the venv again. uv is bind-mounted for the build and is not in the image. A packaged project (a `build-system`) still runs a second `uv sync` after the source copy. pip keeps its download cache in a cache mount.
 

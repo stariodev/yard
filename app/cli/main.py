@@ -338,8 +338,10 @@ def _cmd_app_set(args: argparse.Namespace) -> None:
     found = wrap.get("app") if isinstance(wrap, dict) else None
     app = found if isinstance(found, dict) else {}
     moved = any(key in patch and patch[key] != str(current.get(key) or "") for key in ("repo", "ref"))
-    changed = "runs" in patch and patch["runs"] != str(current.get("runs") or "")
-    if (moved or changed) and str(app.get("trigger") or "") == "push":
+    runs = str(app.get("runs") or "")
+    changed = "runs" in patch and runs != str(current.get("runs") or "")
+    # A check deploys a new repo, ref, or explicit runs. Back to auto changes nothing until the next commit.
+    if (moved or (changed and runs)) and str(app.get("trigger") or "") == "push":
         print(f"Saved. The next check deploys it. Deploy now: yard app deploy --app {name}")
     elif moved:
         print(f"Saved. {name} still runs the old repo and ref until the next deploy.")
