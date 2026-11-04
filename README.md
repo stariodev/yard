@@ -2,6 +2,8 @@
 
 Push a repo to GitHub or Cursor Origin. Yard builds the container and serves the app over HTTPS.
 
+![yard app new, then git push: Yard builds the container with Podman, Caddy serves it over HTTPS, and the app is live](https://raw.githubusercontent.com/stariodev/yard/main/docs/demo.gif)
+
 Yard runs on one Ubuntu VM. It watches the forge, builds each push with Podman, and points Caddy at the new container. A `git push` is the whole deploy. There is no pipeline file and no dashboard.
 
 **Docs: [stario.dev/yard](https://stario.dev/yard)**
