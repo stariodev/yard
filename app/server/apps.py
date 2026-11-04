@@ -703,6 +703,10 @@ async def prune_loop(yard: Yard) -> None:
         await asyncio.sleep(24 * 3600)
 
 
+# The newest images of each app that a prune keeps beyond the running one, for a rollback by hand.
+KEEP_IMAGES = 3
+
+
 @dataclass(slots=True)
 class Image:
     tag: str
@@ -713,43 +717,73 @@ class Image:
 @dataclass(slots=True)
 class Report:
     images: list[Image] = field(default_factory=list)
+    # The bytes the image store shrank by. A dry run frees nothing.
     freed: int = 0
     days: int = 0
     dry: bool = False
+    # The untagged build images older than `days`, removed (or found, on a dry run).
+    untagged: int = 0
 
 
 async def prune(yard: Yard, days: int, dry: bool, *, actor: str = "") -> Report:
-    """Remove localhost images no container uses."""
-    listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
-    keep_images = {item.image for item in listed.values() if item.image.startswith("localhost/")}
+    """Remove the app images no container uses, then the untagged build images older than `days`.
 
+    Each app keeps its running image and its newest KEEP_IMAGES. One app that deploys many times a
+    day keeps only those: every build copies its venv into a layer of its own. An untagged image
+    newer than `days` stays: it is the build cache of the next deploy.
+    """
+    listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    keep_images = {item.image for item in listed.values()}
     cutoff = time.time() - days * 86400
+    until = f"until={days * 24}h"
     result = Report(days=days, dry=dry)
-    raw = await yard.podman.run("images", "--format", "json")
-    for image in podman.parse_images(raw):
+    before = 0 if dry else await _image_bytes(yard)
+
+    newest: dict[str, int] = {}
+    tagged = podman.parse_images(await yard.podman.run("images", "--format", "json"))
+    tagged.sort(key=lambda image: image.created.timestamp() if image.created else 0, reverse=True)
+    for image in tagged:
         if not image.name.startswith("localhost/") or image.name == "localhost/yard-apply":
             continue
-        if image.name in keep_images or (image.created and image.created.timestamp() >= cutoff):
+        repo = image.name.rpartition(":")[0]
+        rank = newest[repo] = newest.get(repo, -1) + 1
+        old = not image.created or image.created.timestamp() < cutoff
+        if image.name in keep_images or (rank < KEEP_IMAGES and not old):
             continue
         kept = ""
         if not dry:
             try:
                 await yard.podman.run("rmi", image.name)
-            except Exception as exc:
+            except YardError as exc:
                 # Podman refuses an image a container uses. The refusal is a kept reason.
-                kept = str(exc).removeprefix(f"podman rmi {image.name}: ").splitlines()[-1].strip()
-        if not kept:
-            result.freed += image.size
+                kept = exc.message.removeprefix(f"podman rmi {image.name}: ").splitlines()[-1].strip()
         result.images.append(Image(image.name, image.size, kept))
-    # podman image prune does not run: the build cache is worth keeping.
-    if not dry:
-        count = sum(1 for image in result.images if not image.kept)
-        journal.send(
-            yard.config,
-            "prune",
-            f"pruned {count} images",
-            count=str(count),
-            freed=str(result.freed),
-            actor=actor,
-        )
+
+    if dry:
+        found = await yard.podman.run("images", "-q", "--filter", "dangling=true", "--filter", until)
+        result.untagged = len(found.split())
+        return result
+    # Podman's own prune: dangling images only, and only the ones older than `days`.
+    removed = await yard.podman.run("image", "prune", "-f", "--filter", until)
+    result.untagged = len(removed.split())
+    result.freed = max(0, before - await _image_bytes(yard))
+    count = sum(1 for image in result.images if not image.kept)
+    journal.send(
+        yard.config,
+        "prune",
+        f"pruned {count} images and {result.untagged} untagged",
+        count=str(count),
+        untagged=str(result.untagged),
+        freed=str(result.freed),
+        actor=actor,
+    )
     return result
+
+
+async def _image_bytes(yard: Yard) -> int:
+    """The size of the image store; 0 when Podman does not say."""
+    try:
+        found = podman.parse_system_df(await yard.podman.run("system", "df", "--format", "json"))
+    except YardError:
+        return 0
+    return found[0] if found else 0

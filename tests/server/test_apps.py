@@ -555,22 +555,34 @@ def _yard(tmp_path: Path) -> Yard:
 
 
 class _Fake(Podman):
-    def __init__(self) -> None:
+    """The prune host. `system df` shrinks by 1000 bytes after the first call."""
+
+    def __init__(self, images: str = IMAGES) -> None:
         super().__init__("podman", False)
+        self.images = images
+        self.calls: list[tuple[str, ...]] = []
         self.removed: list[str] = []
 
     async def run(self, *args: str, timeout=None) -> str:
+        self.calls.append(args)
         if args[:1] == ("ps",):
             return (
                 '[{"Names":["heldso-app-1"],"State":"running","Image":"localhost/app:ne11",'
                 '"Labels":{"com.docker.compose.project":"heldso","com.docker.compose.service":"app"}}]'
             )
+        if args[:2] == ("images", "-q"):
+            return "aaa\nbbb\n"
         if args[:1] == ("images",):
-            return IMAGES
+            return self.images
+        if args[:2] == ("image", "prune"):
+            return "aaa\nbbb\nccc\n"
+        if args[:2] == ("system", "df"):
+            size = 5000 if sum(call[:2] == ("system", "df") for call in self.calls) == 1 else 4000
+            return json.dumps([{"Type": "Images", "RawSize": size, "RawReclaimable": 0}])
         if args[:1] == ("rmi",):
             self.removed.append(args[1])
             if args[1] == "localhost/busy:t4g":
-                raise YardError(502, "podman", "image is in use")
+                raise YardError(502, "podman", "podman rmi localhost/busy:t4g: image is in use")
             return ""
         return "[]"
 
@@ -582,15 +594,35 @@ def test_prune_removes_what_no_app_needs(tmp_path: Path):
     found = asdict(asyncio.run(apps.prune(yard, 7, False)))
     images = {row["tag"]: row["kept"] for row in found["images"]}
     assert set(images) == {"localhost/app:0ld", "localhost/app:st4le", "localhost/busy:t4g"}
+    assert images["localhost/busy:t4g"] == "image is in use"
     assert fake.removed == ["localhost/app:0ld", "localhost/app:st4le", "localhost/busy:t4g"]
-    assert found["freed"] == 110 + 400
+    # Podman prunes the untagged build images older than the days; the store shrank by 1000 bytes.
+    assert ("image", "prune", "-f", "--filter", "until=168h") in fake.calls
+    assert found["untagged"] == 3
+    assert found["freed"] == 1000
+
+
+def test_prune_keeps_the_newest_three_of_an_app(tmp_path: Path):
+    """Ten builds today: the running one and the three newest stay; the six others go."""
+    yard = _yard(tmp_path)
+    builds = [{"Names": [f"localhost/app:b{n}"], "Created": int(NOW - n * 600), "Size": 300} for n in range(10)]
+    builds.append({"Names": ["localhost/app:ne11"], "Created": int(NOW - 7200), "Size": 300})
+    fake = _Fake(json.dumps(builds))
+    yard.podman = fake
+    found = asdict(asyncio.run(apps.prune(yard, 7, False)))
+    assert sorted(row["tag"] for row in found["images"]) == [f"localhost/app:b{n}" for n in range(3, 10)]
 
 
 def test_prune_dry_run_removes_nothing(tmp_path: Path):
     yard = _yard(tmp_path)
-    yard.podman = _Fake()
+    fake = _Fake()
+    yard.podman = fake
     found = asdict(asyncio.run(apps.prune(yard, 7, True)))
     assert found["dry"]
+    assert found["untagged"] == 2
+    assert found["freed"] == 0
+    assert not fake.removed
+    assert not any(call[:2] in (("image", "prune"), ("system", "df")) for call in fake.calls)
 
 
 def _stario_clone(yard: Yard, name: str) -> Path:

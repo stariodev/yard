@@ -320,19 +320,23 @@ while pos < len(argv):
         matches.append(arg)
         pos += 1
 
-want = {{}}
+# "+" splits OR groups; in a group one field is OR over its values and the fields are AND.
+groups = [{{}}]
 for match in matches:
+    if match == "+":
+        groups.append({{}})
+        continue
     field, _, value = match.partition("=")
-    want.setdefault(field, set()).add(value)
+    groups[-1].setdefault(field, set()).add(value)
 entries = [
     entry
     for entry in (json.loads(line) for line in open({data!r}) if line.strip())
-    if all(str(entry.get(field) or "") in values for field, values in want.items())
+    if any(all(str(entry.get(field) or "") in values for field, values in want.items()) for want in groups)
 ]
 if after:
     found = [i for i, entry in enumerate(entries) if str(entry.get("__CURSOR") or "") == after]
     entries = entries[found[0] + 1 :] if found else entries
-if lines:
+if lines and lines != "all":
     count = int(lines.lstrip("+"))
     entries = entries[:count] if lines.startswith("+") else entries[-count:]
 for entry in entries:
@@ -455,6 +459,90 @@ async def test_logs_needs_a_token(yard_journal):
     assert res.status_code == 401
 
 
+def _event_entry(n: int, **fields: str) -> dict:
+    return {"__CURSOR": f"cursor-{n}", "__REALTIME_TIMESTAMP": str(int(MICROS) + n * 1_000_000), **fields}
+
+
+def _podman_event(n: int, event: str, name: str) -> dict:
+    labels = json.dumps({"com.docker.compose.project": name.split("-app-")[0]})
+    return _event_entry(
+        n,
+        SYSLOG_IDENTIFIER="podman",
+        PODMAN_TYPE="container",
+        PODMAN_EVENT=event,
+        PODMAN_NAME=name,
+        PODMAN_LABELS=labels,
+        MESSAGE=f"container {event} {name}",
+    )
+
+
+@pytest.fixture
+async def yard_events(tmp_path, monkeypatch):
+    """A busy journal: the timeline rows between Podman's access log, sync, and health_status lines."""
+    entries = [
+        _podman_event(0, "create", "heldso-app-1"),
+        _event_entry(1, SYSLOG_IDENTIFIER="podman", MESSAGE='@ - - "GET /v5.7.0/libpod/containers/json" 200'),
+        _podman_event(2, "health_status", "yard-app-1"),
+        _podman_event(3, "sync", "heldso-app-1"),
+        _podman_event(4, "start", "heldso-app-1"),
+        _event_entry(5, SYSLOG_IDENTIFIER="yard", YARD_EVENT="app.update", YARD_APP="other", MESSAGE="app other"),
+        _podman_event(6, "died", "heldso-app-1"),
+        _event_entry(7, SYSLOG_IDENTIFIER="yard", YARD_EVENT="env.set", YARD_APP="heldso", MESSAGE="heldso env"),
+    ]
+    script, argv_log = _cursor_journalctl(tmp_path, entries)
+    async with serve(tmp_path, monkeypatch, journalctl=str(script), journal_dir="journal") as (client, token):
+        yield client, token, argv_log
+
+
+async def test_events_read_forward_from_the_last_hour(yard_events):
+    """No start: the last hour, oldest first. The journal match drops the noise before Yard reads it."""
+    client, token, argv_log = yard_events
+    rows = (await client.get("/api/v1/events", headers=auth(token))).json()
+    assert [(row["event"], row["cursor"]) for row in rows] == [
+        ("create", "cursor-0"),
+        ("start", "cursor-4"),
+        ("app.update", "cursor-5"),
+        ("died", "cursor-6"),
+        ("env.set", "cursor-7"),
+    ]
+    argv = argv_log.read_text().split()
+    assert argv[argv.index("--since") + 1] == "-1h"
+    assert argv[argv.index("-n") + 1] == "+100"
+    assert "PODMAN_TYPE=container" in argv and "+" in argv
+    assert "PODMAN_EVENT=sync" not in argv and "PODMAN_EVENT=health_status" not in argv
+
+
+async def test_events_page_on_with_the_cursor(yard_events):
+    client, token, argv_log = yard_events
+    first = (await client.get("/api/v1/events?lines=2", headers=auth(token))).json()
+    assert [row["event"] for row in first] == ["create", "start"]
+    after = first[-1]["cursor"]
+    second = (await client.get(f"/api/v1/events?lines=2&after={after}", headers=auth(token))).json()
+    assert [row["event"] for row in second] == ["app.update", "died"]
+    last = argv_log.read_text().splitlines()[-1].split()
+    assert "--after-cursor" in last and "--since" not in last
+
+
+async def test_events_read_on_when_a_filter_drops_rows(yard_events):
+    """app=heldso drops the row of another app; the route reads the next page to fill `lines`."""
+    client, token, argv_log = yard_events
+    rows = (await client.get("/api/v1/events?lines=4&app=heldso", headers=auth(token))).json()
+    assert [row["event"] for row in rows] == ["create", "start", "died", "env.set"]
+    assert len(argv_log.read_text().splitlines()) == 2
+
+
+async def test_events_follow_starts_now_without_a_start(yard_events):
+    client, token, argv_log = yard_events
+    res = await client.get("/api/v1/events?follow=1", headers=auth(token))
+    assert res.status_code == 200
+    argv = argv_log.read_text().split()
+    assert argv[argv.index("-n") + 1] == "0" and "-f" in argv and "--since" not in argv
+    res = await client.get("/api/v1/events?follow=1&since=-15m", headers=auth(token))
+    assert [json.loads(line)["event"] for line in res.text.splitlines()][:2] == ["create", "start"]
+    argv = argv_log.read_text().splitlines()[-1].split()
+    assert argv[argv.index("-n") + 1] == "all" and argv[argv.index("--since") + 1] == "-15min"
+
+
 async def test_events_merge_podman_and_yard(yard_journal):
     client, token, argv_log, out = yard_journal
     out.write_text(PODMAN_DIED + "\n" + PODMAN_SYSTEM + "\n" + YARD_DEPLOY + "\n")
@@ -472,7 +560,7 @@ async def test_events_merge_podman_and_yard(yard_journal):
     assert deploy["fields"] == {"cause": "manual"}
     argv = argv_log.read_text().splitlines()
     assert "SYSLOG_IDENTIFIER=podman" in argv and "SYSLOG_IDENTIFIER=yard" in argv
-    assert argv[argv.index("--since") + 1] == "-1d"
+    assert argv[argv.index("--since") + 1] == "-1h"
 
 
 def _deploy_event(event: str, code: str = "") -> str:
