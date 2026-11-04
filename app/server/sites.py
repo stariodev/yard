@@ -1,6 +1,5 @@
 """The Caddy site file of each app. Yard stores the text; Caddy checks it, loads it, and serves it."""
 
-import asyncio
 import logging
 from pathlib import Path
 
@@ -96,7 +95,8 @@ async def boot(yard: Yard, *, tries: int = 60, pause: float = 2.0) -> None:
             if exc.status != 502:
                 log.warning("caddy refused the site files: %s", exc.message)
                 return
-            await asyncio.sleep(pause)
+            if not await yard.pause(pause):
+                return
             continue
         return
     log.warning("caddy did not answer; the site files load at the next change")
