@@ -373,16 +373,16 @@ wheels = [
 
 [[package]]
 name = "stario"
-version = "5.2.0"
+version = "5.3.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e4/1f/cc561846b026ba1e66cbda8fc8e8b4a592a8e223ae74afd5d300af431151/stario-5.2.0.tar.gz", hash = "sha256:5d0d8355d07783839123ba970d706eb57656c31827efdcb5701b3da0e18cdc18", size = 290063, upload-time = "2026-10-27T15:12:07.017Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/d7/66e35d5a270a6a38847ae36b0406878222023f2f5136135a2f9673238503/stario-5.3.1.tar.gz", hash = "sha256:26cda13724a2da3fe845417dac27138e39e53e4e00276738bb464008f9a44f70", size = 294670, upload-time = "2026-11-04T10:32:51.183Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/af/0e180956436196308838d8674deac343000ec3144f71e1aed298456d7f06/stario-5.2.0-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:6a99b925a726f16b1be0c9205876445c62eeb77bf6e6d4820e994af9a5862994", size = 1472855, upload-time = "2026-10-27T15:11:57.196Z" },
-    { url = "https://files.pythonhosted.org/packages/0a/13/f64e459b0d9752dc91f07fedfab8939d1fc7f474c4774fb1a7392d6f9721/stario-5.2.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:886a75a1c3589c50593818d3bac602b4b98b7b0d96936d2896e62c5c83aebb03", size = 5067906, upload-time = "2026-10-27T15:11:58.685Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/ab/f279b326843cac841053f908d37f0dfca6eecedd780a8af8be8c3dbc4c7f/stario-5.2.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2bdd7ebb41bc5c34057d508ee64ef260ff81b42798ca8b5cccef790cc4fb9ad0", size = 5083538, upload-time = "2026-10-27T15:12:00.285Z" },
-    { url = "https://files.pythonhosted.org/packages/61/6c/993258767128cf2ec7b1c55ebd3382fd03f5a0a4b36deacfdc7b6d1d359e/stario-5.2.0-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:bfe2e15bb8c686af1e5c6e85d6a1307338bddf232dbfcc3b596ceee42cc9b919", size = 1527134, upload-time = "2026-10-27T15:12:01.973Z" },
-    { url = "https://files.pythonhosted.org/packages/8e/98/aeed2caf6952a843875848c989ddf11b872e4821077797919f3f73cdfdb2/stario-5.2.0-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c560f460dffa21bf3ce8429a35ac391ae09bf26dde9ea0fc145ee4c2dd020f45", size = 5507756, upload-time = "2026-10-27T15:12:03.562Z" },
-    { url = "https://files.pythonhosted.org/packages/22/e7/9c7f1b980600be545bb147e4176c7940101f3b720059536ac338c93afcdf/stario-5.2.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6ae631817471861a95a2129a722dbd5e996f1bddf23f2f9a63f9e8233bfbd2f4", size = 5411185, upload-time = "2026-10-27T15:12:05.078Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/f0/1229132572bb1d056309e8d161af1fbc0cf9731b1a411c317648e615d7e3/stario-5.3.1-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:f98301ad56920129872ec8ab7a1e808460f1d1442e8caa5fbbf2549be15c02e3", size = 1476395, upload-time = "2026-11-04T10:32:40.902Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/16/2f9c368629af14a295b496eb37d555efce8d1636e93d44ac9ac680d3848f/stario-5.3.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ac5007df4f41734e71223e0b78b687e396e40d3028adefabd738da0257e02172", size = 5083810, upload-time = "2026-11-04T10:32:42.74Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/d0/1bf94d4c149f1e2f782cc2a18a573f81178ed696dac92a2fed92db491d5a/stario-5.3.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3a71f23147d50044e7f06026604f980f6483dbf2a875d2ec98d93be88bc7bc46", size = 5094278, upload-time = "2026-11-04T10:32:44.392Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/40/a5158f54859930b1e1ec0e83caf58b2447e1230c5dda42e41b9922a6de6e/stario-5.3.1-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:c2e74807300c53cfbaf1d39b780504d12d336a5d8ac4f844483f6dd0c7f0d49a", size = 1530947, upload-time = "2026-11-04T10:32:46.373Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/a5/bdb43c1e3260061344d1c2e6934fc6bea0d55f190fde83883c05fb3c2a1b/stario-5.3.1-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:996decb518b5eb0ecbe7a6d3194a1b338a4b61310baf02d4076acc37fbc84ede", size = 5521053, upload-time = "2026-11-04T10:32:47.919Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/c0/8ea11087d1e9e890d3738036ec2ed403fd5e9e45d78e9b9eac4ba467bc45/stario-5.3.1-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:27911dd548e6aaadfc17b8f78a1db46b2f562c467855c37e3e308f33351e2571", size = 5429044, upload-time = "2026-11-04T10:32:49.591Z" },
 ]
 
 [[package]]

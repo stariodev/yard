@@ -4,7 +4,7 @@ How to build a Stario JSON API. This is the default; when the developer asks for
 
 Stario is a Python HTTP framework. This app has no HTML and no Datastar. A handler reads the request and writes JSON or text. Docs: https://stario.dev/docs.
 
-Before you call work done, run `just check` (ruff, ruff format, pyright, pytest) and fix every failure.
+Before you call work done, run `just check` (ruff, ruff format, pyrefly, pytest) and fix every failure.
 
 ## Stario rules
 
