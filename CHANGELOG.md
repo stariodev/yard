@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Yard locks stario 5.3.4. Its wheels ship without debug info, so the Yard image is about 12 MB smaller.
+
 ## 0.12.0
 
 ### Breaking
