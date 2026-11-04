@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Prune runs `podman image prune --external`, so it also removes old untagged images that a build container from a stopped build still names. Before, on 2026-11-04, Podman removed part of the images and then refused with "image is in use by a container". Yard then failed the prune, so it wrote no event and no `freed`. A refusal is now `untagged_error` in the report and in the prune event, and the rest of the report still counts.
+- `yard prune` waits up to 10 minutes for the answer, and the `image prune` call gets the same limit. Before, both stopped at 30 s and 20 s, while a prune of 345 images took 51 s.
+
 - Prune keeps the 3 newest images of each app, plus the image that runs, and removes the other unused app images at once. Before, it kept every image newer than 7 days. Each build of a Yard template copies its venv into a layer of its own, about 250 MB, so a host that deployed 136 times in a week kept about 27 GB and the prune removed nothing.
 - Prune then runs `podman image prune` for the untagged build images older than `days`. The newer ones stay as the build cache. The report gains `untagged`, the count of those images. `freed` is now how much the image store shrank (`podman system df` before and after). Before, it added up the full size of each image, shared layers included. A dry run reports no `freed`.
 - Breaking: `GET /api/v1/events` reads forward from a start: `after` (a row's cursor) or `since`, which defaults to the last hour. The answer is the first `lines` rows from there, oldest first, and each row has a `cursor`. Before, the route read up to 50 000 journal entries of the last day and answered the last `lines` rows. A follow with no start begins now, like `podman events`; with `since` or `after` it replays from there.

@@ -597,9 +597,36 @@ def test_prune_removes_what_no_app_needs(tmp_path: Path):
     assert images["localhost/busy:t4g"] == "image is in use"
     assert fake.removed == ["localhost/app:0ld", "localhost/app:st4le", "localhost/busy:t4g"]
     # Podman prunes the untagged build images older than the days; the store shrank by 1000 bytes.
-    assert ("image", "prune", "-f", "--filter", "until=168h") in fake.calls
+    assert ("image", "prune", "-f", "--external", "--filter", "until=168h") in fake.calls
     assert found["untagged"] == 3
     assert found["freed"] == 1000
+
+
+def test_a_refused_untagged_prune_still_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Production, 2026-11-04: Podman removed part of the untagged images, then answered 500.
+
+    The report says why, the store size still counts, and the prune event still lands.
+    """
+    yard = _yard(tmp_path)
+    fake = _Fake()
+    real_run = fake.run
+
+    async def refusing(*args: str, timeout=None) -> str:
+        if args[:2] == ("image", "prune"):
+            fake.calls.append(args)
+            raise YardError(
+                502, "podman", "podman image prune -f: Error: image used by 5738: image is in use by a container"
+            )
+        return await real_run(*args, timeout=timeout)
+
+    monkeypatch.setattr(fake, "run", refusing)
+    yard.podman = fake
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(apps.journal, "send", lambda config, event, message, **fields: sent.append((event, fields)))
+    found = asdict(asyncio.run(apps.prune(yard, 7, False)))
+    assert found["untagged_error"] == "Error: image used by 5738: image is in use by a container"
+    assert found["freed"] == 1000
+    assert sent and sent[0][0] == "prune" and sent[0][1]["untagged_error"] == found["untagged_error"]
 
 
 def test_prune_keeps_the_newest_three_of_an_app(tmp_path: Path):

@@ -723,6 +723,8 @@ class Report:
     dry: bool = False
     # The untagged build images older than `days`, removed (or found, on a dry run).
     untagged: int = 0
+    # Why `podman image prune` stopped part way; "" when it finished.
+    untagged_error: str = ""
 
 
 async def prune(yard: Yard, days: int, dry: bool, *, actor: str = "") -> Report:
@@ -763,9 +765,15 @@ async def prune(yard: Yard, days: int, dry: bool, *, actor: str = "") -> Report:
         found = await yard.podman.run("images", "-q", "--filter", "dangling=true", "--filter", until)
         result.untagged = len(found.split())
         return result
-    # Podman's own prune: dangling images only, and only the ones older than `days`.
-    removed = await yard.podman.run("image", "prune", "-f", "--filter", until)
-    result.untagged = len(removed.split())
+    # Podman's own prune: dangling images older than `days`. --external also takes the ones a build
+    # container left by a stopped build still names; a refusal stops it part way, and the report says so.
+    try:
+        removed = await yard.podman.run("image", "prune", "-f", "--external", "--filter", until, timeout=600)
+        result.untagged = len(removed.split())
+    except YardError as exc:
+        # The message is "podman <args>: <podman's text>"; the report keeps Podman's last line.
+        result.untagged_error = (exc.message.partition(": ")[2] or exc.message).splitlines()[-1].strip()
+        log.warning("prune: %s", exc.message)
     result.freed = max(0, before - await _image_bytes(yard))
     count = sum(1 for image in result.images if not image.kept)
     journal.send(
@@ -774,6 +782,7 @@ async def prune(yard: Yard, days: int, dry: bool, *, actor: str = "") -> Report:
         f"pruned {count} images and {result.untagged} untagged",
         count=str(count),
         untagged=str(result.untagged),
+        untagged_error=result.untagged_error,
         freed=str(result.freed),
         actor=actor,
     )
