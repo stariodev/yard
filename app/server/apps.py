@@ -141,6 +141,8 @@ def start_deploy(yard: Yard, name: str, *, cause: str = "manual", actor: str = "
 
 
 def _new_job(yard: Yard, name: str, cause: str, actor: str) -> Job:
+    """A new job. It replaces the app's job only when that one has ended; `_deploy_body` takes the slot
+    once it holds the lock, so a follower of the running deploy keeps its job."""
     job = Job(
         id=secrets.token_hex(4),
         app=name,
@@ -148,7 +150,9 @@ def _new_job(yard: Yard, name: str, cause: str, actor: str) -> Job:
         actor=actor,
         started=now(),
     )
-    yard.deploys[name] = job
+    running = yard.deploys.get(name)
+    if running is None or running.status != "running":
+        yard.deploys[name] = job
     return job
 
 
@@ -177,6 +181,7 @@ async def _finish(yard: Yard, job: Job) -> Outcome:
 async def _deploy_body(yard: Yard, job: Job) -> Outcome:
     name = job.app
     async with yard.lock(name):
+        yard.deploys[name] = job
         try:
             app = yard.store.app(name)
         except YardError as exc:
@@ -473,25 +478,42 @@ _DEBOUNCE = 10.0
 
 
 async def check_all(yard: Yard) -> None:
-    """Poll every push app: repo tips once per forge, image and URL apps per app."""
-    for forge in yard.forges.values():
-        await _check_forge(yard, forge)
-    fetched: dict[str, bytes] = {}
-    for app in yard.store.list_apps():
-        if not app.repo:
-            await _check(yard, app, fetched=fetched, cause="check", actor="check")
+    """Poll every app: repo tips per forge, image and URL apps per app.
+
+    One `podman ps` serves the round. The apps check side by side, so one slow deploy does not hold
+    the others back; each app's deploys still run one at a time on its lock.
+    """
+    try:
+        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    except YardError:
+        # Each check still reads its tip, then tries `podman ps` itself and stops there.
+        listed = None
+    fetched: dict[str, asyncio.Future[bytes]] = {}
+    await asyncio.gather(
+        *(_check_forge(yard, forge, listed) for forge in yard.forges.values()),
+        *(
+            _check(yard, app, listed, fetched=fetched, cause="check", actor="check")
+            for app in yard.store.list_apps()
+            if not app.repo
+        ),
+    )
 
 
 async def _check(
     yard: Yard,
     app: App,
+    listed: dict[str, podman.Container] | None = None,
     *,
     token: str = "",
-    fetched: dict[str, bytes] | None = None,
+    fetched: dict[str, asyncio.Future[bytes]] | None = None,
     cause: str,
     actor: str,
 ) -> None:
-    """The newest (revision, template) for one app. A moved pair deploys once."""
+    """The newest (revision, template) for one app. A moved pair deploys once.
+
+    `listed` is the round's `podman ps`; without it the check runs its own. `fetched` shares one
+    download per compose URL between the apps of a round.
+    """
     try:
         if app.repo:
             clone = yard.config.clone(app.name)
@@ -501,11 +523,10 @@ async def _check(
         elif parse_runs(app.runs)[0] == "image":
             current = (await sources.digest(app.runs), "")
         else:
-            assert fetched is not None
-            body = fetched.get(app.runs)
-            if body is None:
-                body = await sources.fetch_file(app.runs)
-                fetched[app.runs] = body
+            fetched = {} if fetched is None else fetched
+            if app.runs not in fetched:
+                fetched[app.runs] = asyncio.ensure_future(sources.fetch_file(app.runs))
+            body = await fetched[app.runs]
             current = ("sha256:" + hashlib.sha256(body).hexdigest(), "")
     except Exception as exc:
         tip = yard.tips.setdefault(app.name, Tip())
@@ -517,11 +538,12 @@ async def _check(
     tip.revision, tip.template = current
     if app.trigger != "push":
         return
-    try:
-        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
-    except YardError as exc:
-        log.warning("%s check: %s", app.name, exc)
-        return
+    if listed is None:
+        try:
+            listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+        except YardError as exc:
+            log.warning("%s check: %s", app.name, exc)
+            return
     deployed = status.running_plan(app, listed) or Deployed()
     # The last try is on the deploy container too, so a restart does not retry a failed pair.
     if current in ((deployed.revision, deployed.template), status.last_try(listed, app.name)):
@@ -543,7 +565,7 @@ async def _check(
             app = yard.store.app(app.name)
         except YardError:
             return
-        await _check(yard, app, token=token, fetched={}, cause=cause, actor=actor)
+        await _check(yard, app, token=token, cause=cause, actor=actor)
 
 
 def _template_at(clone: Path, app: App) -> str:
@@ -569,10 +591,12 @@ def _moved(app: App, deployed: Deployed, current: tuple[str, str]) -> str:
     return " and ".join(parts) or "revision"
 
 
-async def _check_forge(yard: Yard, forge: Forge) -> None:
+async def _check_forge(yard: Yard, forge: Forge, listed: dict[str, podman.Container] | None) -> None:
+    """The push apps on one forge. The tokens come first, one at a time, so each installation mints once."""
     if not forge.connected():
         return
     prefix = f"https://{forge.host}/"
+    checks = []
     for app in yard.store.list_apps():
         if app.trigger != "push" or not app.repo.lower().startswith(prefix):
             continue
@@ -581,7 +605,8 @@ async def _check_forge(yard: Yard, forge: Forge) -> None:
         except YardError as exc:
             log.warning("%s token: %s", forge.name, exc)
             continue
-        await _check(yard, app, token=token, cause="check", actor="check")
+        checks.append(_check(yard, app, listed, token=token, cause="check", actor="check"))
+    await asyncio.gather(*checks)
     forge.last_check = now()
 
 
@@ -654,34 +679,28 @@ async def _check_repo(yard: Yard, repo: str) -> None:
 
 async def loop(yard: Yard) -> None:
     """One loop that asks the forges for the watched refs on a timer."""
-    try:
-        while True:
-            await asyncio.sleep(yard.config.check_seconds)
-            try:
-                await check_all(yard)
-            except Exception as exc:
-                log.warning("check: %s", exc)
-    except asyncio.CancelledError:
-        return
+    while True:
+        await asyncio.sleep(yard.config.check_seconds)
+        try:
+            await check_all(yard)
+        except Exception as exc:
+            log.warning("check: %s", exc)
 
 
 async def prune_loop(yard: Yard) -> None:
     """The daily prune. The first run waits ten minutes so the boot deploys settle."""
-    try:
-        await asyncio.sleep(600)
-        while True:
-            try:
-                found = await prune(yard, yard.config.prune_days, False, actor="auto")
-            except Exception as exc:
-                log.warning("prune: %s", exc)
-                yard.last_prune_error = str(exc)
-            else:
-                yard.last_prune = now()
-                yard.last_prune_freed = found.freed
-                yard.last_prune_error = ""
-            await asyncio.sleep(24 * 3600)
-    except asyncio.CancelledError:
-        return
+    await asyncio.sleep(600)
+    while True:
+        try:
+            found = await prune(yard, yard.config.prune_days, False, actor="auto")
+        except Exception as exc:
+            log.warning("prune: %s", exc)
+            yard.last_prune_error = str(exc)
+        else:
+            yard.last_prune = now()
+            yard.last_prune_freed = found.freed
+            yard.last_prune_error = ""
+        await asyncio.sleep(24 * 3600)
 
 
 @dataclass(slots=True)

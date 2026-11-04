@@ -80,6 +80,10 @@ def _site(yard: Yard, name: str, host: str) -> None:
     path.write_text(f"{host} {{\n\treverse_proxy {name}-app-1:8000\n}}\n")
 
 
+async def _no_forge_call(self):
+    raise AssertionError("the doctor asked the forge API")
+
+
 def _run(yard: Yard) -> dict[str, dict]:
     return {check["name"]: check for check in map(asdict, asyncio.run(doctor.run(yard)))}
 
@@ -121,21 +125,15 @@ def test_doctor_forge_rows_when_connected(tmp_path: Path, monkeypatch: pytest.Mo
     usage = collections.namedtuple("usage", "total used free")(200, 100, 100)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage)
     monkeypatch.setattr(Origin, "connected", lambda self: True)
-
-    async def fake_app(self):
-        return {"displayName": "yard"}
-
-    async def fake_find(self):
-        return [{"id": "ins_1", "account": "org", "selection": "all"}]
+    yard.forge_named("origin").save(installations=[{"id": "ins_1", "account": "org", "selection": "all"}])
 
     async def fake_token(self, repo: str = ""):
         return "tok"
 
-    monkeypatch.setattr(Origin, "get_app", fake_app)
-    monkeypatch.setattr(Origin, "find_installations", fake_find)
     monkeypatch.setattr(Origin, "token", fake_token)
+    monkeypatch.setattr(Origin, "find_installations", _no_forge_call)
     found = _run(yard)
-    assert found["origin app"]["detail"] == "yard"
+    assert "origin app" not in found
     assert found["origin installation org"]["detail"] == "all repos"
     assert found["origin token"]["ok"]
     assert found["origin webhook"]["detail"] == "none since boot"
@@ -256,12 +254,8 @@ def test_doctor_routes_and_certificates(tmp_path: Path, monkeypatch: pytest.Monk
     assert "dns heldso.example.com" not in found
 
 
-def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = _yard(tmp_path, ps=CADDY_PS)
-    yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    _site(yard, "yard", "yard.example.com")
-    _site(yard, "heldso", "heldso.example.com")
+def _answer_https(monkeypatch: pytest.MonkeyPatch, status_line: bytes) -> list[bytes]:
+    """Caddy answers every GET with status_line. Returns the requests sent."""
     monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda host, port: [(0, 0, 0, "", ("10.0.0.1", 443))])
     sent: list[bytes] = []
 
@@ -270,10 +264,7 @@ def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             sent.append(data)
 
         def recv(self, n):
-            return b"HTTP/1.1 200 OK\r\n\r\n"
-
-        def close(self):
-            pass
+            return status_line + b"\r\n\r\n"
 
         def __enter__(self):
             return self
@@ -287,10 +278,33 @@ def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(doctor.socket, "create_connection", lambda addr, timeout=0: _Sock())
     monkeypatch.setattr(doctor.ssl, "create_default_context", lambda: _TLS())
+    return sent
+
+
+def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    yard = _yard(tmp_path, ps=CADDY_PS)
+    yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    _site(yard, "yard", "yard.example.com")
+    _site(yard, "heldso", "heldso.example.com")
+    sent = _answer_https(monkeypatch, b"HTTP/1.1 200 OK")
     found = _run(yard)
     assert found["https yard.example.com"]["detail"] == "HTTP/1.1 200 OK"
     assert found["https heldso.example.com"]["ok"]
     assert sorted(line.split(b" ")[1] for line in sent) == [b"/", b"/health"]
+
+
+def test_doctor_https_fails_a_502(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Caddy answers 502 for an app that is down. The row fails; a 404 at / still passes."""
+    yard = _yard(tmp_path, ps=CADDY_PS)
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    _site(yard, "heldso", "heldso.example.com")
+    _answer_https(monkeypatch, b"HTTP/2 502 Bad Gateway")
+    row = _run(yard)["https heldso.example.com"]
+    assert row["ok"] is False
+    assert row["detail"] == "HTTP/2 502 Bad Gateway; yard logs heldso-app-1"
+    _answer_https(monkeypatch, b"HTTP/1.1 404 Not Found")
+    assert _run(yard)["https heldso.example.com"]["ok"]
 
 
 def test_doctor_https_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -404,14 +418,17 @@ def test_doctor_healthcheck_ok(tmp_path: Path):
     assert row == {"name": "healthcheck heldso", "ok": True, "detail": "every 10s · healthy", "warn": False}
 
 
-def test_doctor_skips_the_yard_healthcheck(tmp_path: Path):
-    """The yard compose has no healthcheck on purpose, so it earns no row."""
-    yard = _yard(tmp_path, ps=CADDY_PS, inspect=HEALTH_OK)
+def test_doctor_skips_the_yard_healthcheck_and_inspects_once(tmp_path: Path):
+    """The yard deploy probes /health instead, so yard earns no row. One inspect covers every container."""
+    yard_ok = HEALTH_OK.replace("/heldso-app-1", "/yard-app-1")
+    yard = _yard(tmp_path, ps=CADDY_PS, inspect=yard_ok[:-1] + "," + HEALTH_OK[1:])
     yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
     found = _run(yard)
     assert "healthcheck yard" not in found
     assert found["healthcheck heldso"]["ok"]
+    assert isinstance(yard.podman, FakePodman)
+    assert [call[0] for call in yard.podman.calls].count("inspect") == 1
 
 
 def test_doctor_skips_a_healthcheck_for_an_app_without_a_container(tmp_path: Path):
@@ -450,18 +467,13 @@ def test_doctor_a_selected_installation_warns(tmp_path: Path, monkeypatch: pytes
     """A selected-repos install is legitimate; new repos just need a grant."""
     yard = _yard(tmp_path, ps=CADDY_PS)
     monkeypatch.setattr(GitHub, "connected", lambda self: True)
-
-    async def fake_app(self):
-        return {"name": "yard"}
-
-    async def fake_find(self):
-        return [{"id": "101", "account": "org", "selection": "selected", "type": "Organization"}]
+    yard.forge_named("github").save(
+        installations=[{"id": "101", "account": "org", "selection": "selected", "type": "Organization"}]
+    )
 
     async def fake_token(self, repo: str = ""):
         return "tok"
 
-    monkeypatch.setattr(GitHub, "get_app", fake_app)
-    monkeypatch.setattr(GitHub, "find_installations", fake_find)
     monkeypatch.setattr(GitHub, "token", fake_token)
     found = _run(yard)
     row = found["github installation org"]
@@ -475,21 +487,16 @@ def test_doctor_a_selected_installation_warns(tmp_path: Path, monkeypatch: pytes
 def test_doctor_one_installation_row_per_account(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
     monkeypatch.setattr(GitHub, "connected", lambda self: True)
-
-    async def fake_app(self):
-        return {"name": "yard"}
-
-    async def fake_find(self):
-        return [
+    yard.forge_named("github").save(
+        installations=[
             {"id": "101", "account": "Bobowski", "selection": "all"},
             {"id": "202", "account": "stariodev", "selection": "selected"},
         ]
+    )
 
     async def fake_token(self, repo: str = ""):
         return "tok"
 
-    monkeypatch.setattr(GitHub, "get_app", fake_app)
-    monkeypatch.setattr(GitHub, "find_installations", fake_find)
     monkeypatch.setattr(GitHub, "token", fake_token)
     found = _run(yard)
     assert found["github installation Bobowski"]["detail"] == "all repos"

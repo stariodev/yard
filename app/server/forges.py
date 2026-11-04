@@ -181,10 +181,6 @@ class Forge:
         except ValueError:
             return {}
 
-    async def get_app(self) -> dict:
-        body = await self._call("GET", "/app", self.app_jwt())
-        return body if isinstance(body, dict) else {}
-
     async def find_installations(self) -> list[dict]:
         """Every installation of the app, saved to state.json. Returns the saved entries."""
         body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())

@@ -1,8 +1,9 @@
 #!/bin/sh
 # One apply container runs a deploy: build (unless SKIP_BUILD), then compose up.
 # A healthcheck the app's compose file defines is the gate for `up --wait`; without
-# one the deploy ends once the container runs. The env is the only input. Every
-# step prints `==` so `podman logs deploy-<name>` reads as the full story.
+# one the deploy ends once the container runs, or once PROBE_URL answers. The env is
+# the only input. Every step prints `==` so `podman logs deploy-<name>` reads as the
+# full story.
 set -eu
 
 : "${COMPOSE_PROJECT_NAME:?}" "${COMPOSE_FILE:?}"
@@ -78,6 +79,20 @@ revert() {
   exit 1
 }
 
+# Yard sets PROBE_URL for itself: a recurring healthcheck costs CPU and log lines
+# forever, and the gate only matters while a deploy runs.
+probe() {
+  [ -n "${PROBE_URL:-}" ] || return 0
+  echo "== probe $PROBE_URL"
+  waited=0
+  while [ "$waited" -lt "${PROBE_SECONDS:-120}" ]; do
+    wget -q -O /dev/null -T 3 "$PROBE_URL" && return 0
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 1
+}
+
 up() {
   if [ "${SKIP_BUILD:-}" = "1" ]; then
     echo "== reuse $IMAGE"
@@ -87,6 +102,10 @@ up() {
   echo "== start $IMAGE"
   dc up -d --wait --wait-timeout 120 --remove-orphans --no-build || {
     echo "== unhealthy: up failed"
+    revert
+  }
+  probe || {
+    echo "== unhealthy: no answer at $PROBE_URL"
     revert
   }
   echo "== started $IMAGE"

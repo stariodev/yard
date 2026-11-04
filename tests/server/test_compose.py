@@ -124,6 +124,9 @@ def test_the_yard_app_gets_its_host_paths_from_config(tmp_path: Path):
     assert found.env["YARD_ROOT"] == str(tmp_path)
     assert found.env["YARD_PODMAN_SOCK"] == "/run/podman.sock"
     assert found.env["YARD_PODMAN_DIR"] == "/run"
+    # Yard has no healthcheck: its apply probes /health. No other app gets the probe.
+    assert found.env["PROBE_URL"] == "http://yard:8000/health"
+    assert "PROBE_URL" not in run_env(config, _app("heldso"), checkout, "x", "s")
     other = run_env(replace(config, podman_sock=""), _app("yard"), checkout, "x", "s")
     assert other["YARD_PODMAN_SOCK"] == "/run/podman/podman.sock"
 
@@ -345,6 +348,22 @@ def test_record_failure_runs_a_deploy_container_that_prints_and_exits_1(
     assert "yard.error=no" in argv and "yard.sha=abc" in argv
     assert "YARD_LOG=== sync\n!! no" in argv
     assert argv[-3:] == ["localhost/yard-apply", "-c", 'printf "%s\\n" "$YARD_LOG"; exit 1']
+
+
+def test_record_failure_keeps_the_tail_of_a_long_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A 5000-line build log would pass the argv limit of one string. The record keeps its end."""
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_stream(self, *args, on_line=None):
+        calls.append(args)
+        return 1, ""
+
+    monkeypatch.setattr(Podman, "stream", fake_stream)
+    lines = [f"step {n} " + "x" * 60 for n in range(5000)] + ["!! the error"]
+    asyncio.run(compose.record_failure(_config(tmp_path), "heldso", {}, lines))
+    log = next(arg for arg in calls[1] if arg.startswith("YARD_LOG="))
+    assert len(log.encode()) < 128 << 10
+    assert log.endswith("!! the error")
 
 
 def test_record_failure_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
