@@ -96,7 +96,8 @@ def _forge_warn(report: Any) -> None:
 
 def _cmd_prune(args: argparse.Namespace) -> None:
     session = client.load(args)
-    raw = client.api(session, "POST", "/api/v1/prune", {"days": args.days, "dry": args.dry_run})
+    # A real prune removes hundreds of images on a busy host: it can take minutes.
+    raw = client.api(session, "POST", "/api/v1/prune", {"days": args.days, "dry": args.dry_run}, timeout=600)
     client.show(raw, format_prune, dict)
 
 

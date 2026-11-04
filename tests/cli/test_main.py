@@ -779,6 +779,7 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
                 ],
                 "freed": 3000,
                 "untagged": 4,
+                "untagged_error": "Error: image is in use by a container",
                 "days": body["days"],
                 "dry": body["dry"],
             }
@@ -791,6 +792,7 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     out = capsys.readouterr().out
     assert "removed 1 images and 4 untagged build images, 3kB freed" in out
     assert "kept localhost/busy:t4g (image is in use by heldso-app-1)" in out
+    assert "untagged build images stopped part way: Error: image is in use by a container" in out
 
     main(["prune", "--days", "1", "--dry-run"])
     assert seen[("POST", "/api/v1/prune")] == {"days": 1, "dry": True}

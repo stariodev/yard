@@ -443,6 +443,8 @@ def format_prune(report: dict) -> str:
     ]
     for row in refused:
         lines.append(f"kept {row.get('tag')} ({row.get('kept')})")
+    if report.get("untagged_error"):
+        lines.append(f"untagged build images stopped part way: {report.get('untagged_error')}")
     return "\n".join(lines) + "\n"
 
 
