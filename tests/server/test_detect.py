@@ -45,16 +45,22 @@ def test_stario(tmp_path: Path):
     assert "STARIO_HOST" not in resolved.generated
 
 
-def test_every_from_is_pinned(tmp_path: Path):
-    """Every FROM and COPY --from an image ref in a rendered template carries @sha256:."""
-    _write(tmp_path, "serve.nu", "{|req| 'hi'}\n")
+@pytest.mark.parametrize(
+    "files",
+    [{"serve.nu": "{|req| 'hi'}\n"}, {"pyproject.toml": '[project]\nname="x"\n', "uv.lock": "l", "main.py": ""}],
+)
+def test_every_from_is_pinned(tmp_path: Path, files: dict[str, str]):
+    """Every FROM, COPY --from, and --mount from= an image ref in a rendered template carries @sha256:."""
+    for rel, text in files.items():
+        _write(tmp_path, rel, text)
     for line in detect.resolve(tmp_path, "heldso").generated.splitlines():
         if line.startswith("FROM "):
             assert "@sha256:" in line, line
-        if line.startswith("COPY --from="):
-            ref = line.removeprefix("COPY --from=").split(" ", 1)[0]
-            if "/" in ref or ":" in ref:  # an image ref, not a stage name
-                assert "@sha256:" in line, line
+        for prefix in ("COPY --from=", "--mount=type=bind,from="):
+            if prefix in line:
+                ref = line.split(prefix, 1)[1].split(" ", 1)[0].split(",", 1)[0]
+                if "/" in ref or ":" in ref:  # an image ref, not a stage name
+                    assert "@sha256:" in ref, line
 
 
 def test_every_base_is_used(tmp_path: Path):
@@ -104,7 +110,8 @@ def test_python_requirements(tmp_path: Path):
     resolved = detect.resolve(tmp_path, "heldso")
     assert resolved.answer == "yard:python-pip"
     assert resolved.reason == "python: requirements.txt"
-    assert "pip install --no-cache-dir -r requirements.txt" in resolved.generated
+    assert "pip install -r requirements.txt" in resolved.generated
+    assert " AS " not in resolved.generated
     assert 'CMD ["python", "app.py"]' in resolved.generated
 
 
@@ -116,7 +123,9 @@ def test_python_uv_and_entrypoint_order(tmp_path: Path):
     resolved = detect.resolve(tmp_path, "heldso")
     assert resolved.answer == "yard:python-uv"
     assert resolved.reason == "python: uv.lock"
-    assert "uv sync --locked --no-dev" in resolved.generated
+    assert "uv sync --locked --no-install-project --no-dev" in resolved.generated
+    assert "uv sync --locked --no-dev" not in resolved.generated
+    assert " AS " not in resolved.generated
     assert 'CMD ["python", "-m", "app.main"]' in resolved.generated
     assert f"python:3.13-slim-trixie@{BASES['python:3.13-slim-trixie']}" in resolved.generated
 
@@ -245,7 +254,10 @@ def test_python_single_script_entrypoint(tmp_path: Path):
         '[project]\nname="x"\n[project.scripts]\nserve = "x:main"\n\n[build-system]\nrequires=[]\n',
     )
     _write(tmp_path, "uv.lock", "lock")
-    assert 'CMD ["serve"]' in detect.resolve(tmp_path, "n").generated
+    generated = detect.resolve(tmp_path, "n").generated
+    assert 'CMD ["serve"]' in generated
+    # A packaged project installs itself after the source copy.
+    assert generated.index("COPY . /workspace") < generated.index("uv sync --locked --no-dev")
 
 
 def test_stario_dep_matching(tmp_path: Path):
