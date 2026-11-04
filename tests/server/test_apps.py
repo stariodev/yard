@@ -692,6 +692,61 @@ async def test_check_all_deploys_a_moved_tip(tmp_path: Path, monkeypatch: pytest
     assert yard.tips["heldso"].revision == "abc123"
 
 
+async def test_check_all_runs_one_ps_and_does_not_wait_on_a_slow_deploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two moved apps: web deploys while build still builds. The round lists once."""
+    yard = make_yard(tmp_path)
+    yard.store.create_app("build", "https://origin.cursor.com/org/build", "main", "push")
+    yard.store.create_app("web", "https://origin.cursor.com/org/web", "main", "push")
+    host = _Podman()
+    calls: list[tuple[str, ...]] = []
+    real_run = host.run
+
+    async def counted(*args: str, timeout=None) -> str:
+        calls.append(args)
+        return await real_run(*args, timeout=timeout)
+
+    monkeypatch.setattr(host, "run", counted)
+    yard.podman = host
+    _connect(monkeypatch)
+    gate = asyncio.Event()
+    started: list[str] = []
+
+    async def fake_tip(clone, url, ref, token=""):
+        return "abc123"
+
+    async def fake_deploy(host, name, **_):
+        started.append(name)
+        if name == "build":
+            await gate.wait()
+        return apps.Outcome("ok")
+
+    monkeypatch.setattr(git, "remote_tip", fake_tip)
+    monkeypatch.setattr(apps, "deploy", fake_deploy)
+    round_ = asyncio.ensure_future(apps.check_all(yard))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert sorted(started) == ["build", "web"]
+    assert not round_.done()
+    gate.set()
+    await round_
+    assert [args[0] for args in calls].count("ps") == 1
+
+
+async def test_a_waiting_deploy_keeps_the_running_job(tmp_path: Path):
+    """A second deploy waits on the lock. Until it holds it, the running job stays the one a follower reads."""
+    yard = make_yard(tmp_path)
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    async with yard.lock("heldso"):
+        first = apps._new_job(yard, "heldso", "manual", "")
+        waiting = asyncio.ensure_future(apps.deploy(yard, "heldso"))
+        await asyncio.sleep(0)
+        assert yard.deploys["heldso"] is first
+    await waiting
+    assert yard.deploys["heldso"] is not first
+
+
 async def test_check_all_skips_an_unchanged_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path)
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")

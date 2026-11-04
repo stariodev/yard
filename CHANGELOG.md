@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `yard status --full` fails an `https <host>` row on a 5xx answer. Before, any HTTP status passed, so the row stayed green while Caddy answered 502 for an app that was down. A 4xx still passes: an app may have no page at `/`.
+- The doctor asks the forge nothing new on a sweep. The installation rows read the saved installations (the installation webhook keeps them), and the token row uses the cached token. The `<forge> app` row is gone: the token row fails when the app key fails. Before, each `yard status --full` and each Medic sweep sent `GET /app` and `GET /app/installations` and rewrote `state.json`.
+- The doctor reads Podman once: one `podman info`, one `podman ps -a`, and one `podman inspect` for the log drivers and the healthchecks. Before, it ran `info` twice, `ps` twice, and one `inspect` for each app.
+- The Yard container has a healthcheck: `curl` on `/health` once a minute. `up --wait` waits for it, so a Yard that starts and does not answer reverts to the previous image. Before, it stayed live. Podman's compat API drops `start_interval`, so the first check runs one minute after start. `yard status --full` shows a `healthcheck yard` row.
+- The check loop runs one `podman ps -a` for each round, not one for each app. The apps of a round check side by side, so a slow build of one app no longer delays the check of the others. Each app's deploys still run one at a time.
+- A deploy that waits for the lock of its app no longer replaces the running job. `yard app deploy` and `GET /api/v1/apps/{name}/deploy?follow=1` keep following the deploy that runs.
+- A repo-less app reads back with no ref. Before, its record read back `ref main`.
+- A deleted `admin` token stays deleted. Before, the next boot made a new `admin` token and wrote it to `tokens/admin.token`. Yard now makes the first token only on a host with no token, and removes `admin.token` with the `admin` token.
+- A token check reads each token file once and compares the hash in constant time.
+- A failure record keeps the last 30 000 characters of the deploy log, so one argv string stays under the Linux limit of 128 KiB.
+
 - The deploy container `deploy-<name>` is the only deploy record. Before, Yard also wrote `apps/<name>/deployed` and the `deploy.end` event after the apply ended. A Yard self-deploy that replaced the process in the middle of another app's deploy lost both: the app ran the new revision, but `yard status` showed the old one, and the check loop deployed the same revision again (seen on 2026-11-02 for stario-site).
 - Yard writes every label when it creates the deploy container: `yard.sha`, `yard.image`, `yard.runs`, `yard.kind`, `yard.reason`, `yard.template`, `yard.cause`, `yard.actor`, `yard.previous`, and the plan that ran before the deploy (`yard.before.revision`, `yard.before.runs`, `yard.before.kind`, `yard.before.reason`, `yard.before.template`). Nothing is written after the deploy.
 - The running revision is the new plan on exit 0, else the plan before the deploy. A host with no labelled deploy container reads the image of `<name>-app-1`: `localhost/<name>:<sha12>-<tpl8>` for a repo app, `<ref>@sha256:...` for an image app. A URL app with no record has no running revision until its next deploy. A 0.11.0 record without the plan labels reads the template from its image.

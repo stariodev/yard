@@ -30,37 +30,42 @@ class Check:
 
 async def run(yard: Yard) -> list[Check]:
     config = yard.config
+    # One look at Podman feeds every row: info once, ps once, inspect once.
+    try:
+        info: podman.Host | YardError = podman.parse_info(await yard.podman.run("info", "--format", "json"))
+    except YardError as exc:
+        info = exc
     checks = [
-        _check("podman", await _podman(yard)),
+        _check("podman", _podman(info)),
         _check("network yard", await _exists(yard, "network", "yard", "rerun install.sh")),
         _check("apply image", await _exists(yard, "image", "localhost/yard-apply", "rerun install.sh")),
     ]
 
-    if not config.boot:
-        # A laptop run has no host network; the proxy checks do not apply.
-        hosts: list[str] = []
-        yard_hosts: set[str] = set()
-    else:
-        checks.append(_check("caddy", await _caddy_up(yard)))
+    if config.boot:
+        try:
+            listed: dict[str, podman.Container] | YardError = podman.parse_ps(
+                await yard.podman.run("ps", "-a", "--format", "json")
+            )
+        except YardError as exc:
+            listed = exc
+        inspected = await _inspect(yard, listed)
+        checks.append(_check("caddy", _caddy_up(listed)))
         checks.append(_check("caddy admin", await _caddy_admin(yard)))
         checks.append(_check("caddy config", await sites.check(yard)))
-        checks.append(_check("podman journald", await _podman_journald(yard)))
+        checks.append(_check("podman journald", _podman_journald(info)))
         checks.append(_check("journal", await _journal(yard)))
-        checks.append(_check("container logs", await _container_logs(yard)))
+        checks.append(_check("container logs", _container_logs(listed, inspected)))
         checks.append(_check("yard events", _yard_events(config)))
-        checks += await _healthchecks(yard)
-        hosts, yard_hosts = [], set()
+        checks += _healthchecks(yard, inspected)
+        # The first app that names a host owns it. A laptop run has no host network: no proxy rows.
+        hosts: dict[str, str] = {}
         for app in yard.store.list_apps():
-            found = await sites.list_hosts(yard, app.name)
-            hosts += [host for host in found if host not in hosts]
-            if app.name == "yard":
-                yard_hosts.update(found)
-    if config.boot:
-        for host in hosts:
+            for host in await sites.list_hosts(yard, app.name):
+                hosts.setdefault(host, app.name)
+        for host, name in hosts.items():
             checks.append(_check(f"dns {host}", await _dns(host)))
             checks.append(_check(f"certificate {host}", _certificate(config, host)))
-            path = "/health" if host in yard_hosts else "/"
-            checks.append(_check(f"https {host}", await _https(host, path)))
+            checks.append(_check(f"https {host}", await _https(host, name)))
 
     checks += await _forge_rows(yard)
     checks.append(_check("prune", _prune(yard)))
@@ -81,8 +86,10 @@ async def run(yard: Yard) -> list[Check]:
 
 
 async def _forge_rows(yard: Yard) -> list[Check]:
-    """Each forge: app, installation, token, and the last delivery and check.
+    """Each forge: installation, token, and the last delivery and check.
 
+    The installations are the saved ones: the installation webhook keeps them.
+    The token is cached for an hour, so a sweep asks the forge nothing new.
     A forge nothing uses and nothing connects to earns no row at all.
     """
     used = {urlsplit(app.repo).hostname or "" for app in yard.store.list_apps()}
@@ -93,8 +100,7 @@ async def _forge_rows(yard: Yard) -> list[Check]:
                 rows.append(_check(forge.name, (False, f"not connected; run yard forge setup {forge.name}")))
             continue
         rows += [
-            _check(f"{forge.name} app", await _forge_app(forge)),
-            *await _forge_installation_rows(forge),
+            *_forge_installation_rows(forge),
             _check(f"{forge.name} token", await _forge_token(forge)),
             _check(f"{forge.name} webhook", (True, _ago(forge.last_delivery))),
             _check(f"{forge.name} check", (True, _ago(forge.last_check))),
@@ -102,25 +108,10 @@ async def _forge_rows(yard: Yard) -> list[Check]:
     return rows
 
 
-async def _forge_app(forge: Forge) -> tuple[bool, str]:
-    try:
-        body = await forge.get_app()
-    except YardError as exc:
-        return False, f"{exc}; check the app on {forge.host}"
-    name = body.get(forge.name_field) or ""
-    return True, str(name) if name else "ok"
-
-
-async def _forge_installation_rows(forge: Forge) -> list[Check]:
-    """One row per installation of the app, named by account."""
-    try:
-        installations = await forge.find_installations()
-    except YardError as exc:
-        return [_check(f"{forge.name} installation", (False, f"{exc}; check the installation on {forge.host}"))]
-    if not installations:
-        return [_check(f"{forge.name} installation", (False, "no installation; reinstall it from the forge app page"))]
+def _forge_installation_rows(forge: Forge) -> list[Check]:
+    """One row per saved installation of the app, named by account."""
     rows = []
-    for installation in installations:
+    for installation in forge.installations:
         account = str(installation.get("account") or "")
         name = f"{forge.name} installation {account}" if account else f"{forge.name} installation"
         if str(installation.get("selection") or "") != "all":
@@ -158,12 +149,24 @@ def _check(name: str, pair: tuple[bool, str] | tuple[bool, str, bool]) -> Check:
     return Check(name, ok, detail, bool(warn and warn[0]))
 
 
-async def _podman(yard: Yard) -> tuple[bool, str]:
-    try:
-        info = podman.parse_info(await yard.podman.run("info", "--format", "json"))
-    except YardError as exc:
-        return False, f"{exc}; run sudo -u yard podman info on the host"
+def _podman(info: podman.Host | YardError) -> tuple[bool, str]:
+    if isinstance(info, YardError):
+        return False, f"{info}; run sudo -u yard podman info on the host"
     return True, f"podman {info.version}" if info.version else "podman"
+
+
+async def _inspect(yard: Yard, listed: dict[str, podman.Container] | YardError) -> str | YardError:
+    """One inspect of the running containers and the app containers: the log driver and the healthcheck."""
+    if isinstance(listed, YardError):
+        return listed
+    apps = {app_container(app.name) for app in yard.store.list_apps()}
+    names = sorted(name for name, item in listed.items() if item.running or name in apps)
+    if not names:
+        return "[]"
+    try:
+        return await yard.podman.run("inspect", *names, "--format", "json")
+    except YardError as exc:
+        return exc
 
 
 async def _exists(yard: Yard, kind: str, name: str, hint: str = "") -> tuple[bool, str]:
@@ -174,12 +177,10 @@ async def _exists(yard: Yard, kind: str, name: str, hint: str = "") -> tuple[boo
     return True, f"{name} exists"
 
 
-async def _caddy_up(yard: Yard) -> tuple[bool, str]:
-    try:
-        items = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json")).values()
-        found = next((item for item in items if item.app == "yard" and item.service == "caddy"), None)
-    except YardError as exc:
-        return False, str(exc)
+def _caddy_up(listed: dict[str, podman.Container] | YardError) -> tuple[bool, str]:
+    if isinstance(listed, YardError):
+        return False, str(listed)
+    found = next((item for item in listed.values() if item.app == "yard" and item.service == "caddy"), None)
     if found is None:
         return False, "absent; rerun install.sh"
     if not found.running:
@@ -195,12 +196,10 @@ async def _caddy_admin(yard: Yard) -> tuple[bool, str]:
     return True, "ok"
 
 
-async def _podman_journald(yard: Yard) -> tuple[bool, str]:
+def _podman_journald(info: podman.Host | YardError) -> tuple[bool, str]:
     """Podman must write container logs and engine events to the journal."""
-    try:
-        info = podman.parse_info(await yard.podman.run("info", "--format", "json"))
-    except YardError as exc:
-        return False, f"{exc}; check podman on the host"
+    if isinstance(info, YardError):
+        return False, f"{info}; check podman on the host"
     detail = f"logs {info.log_driver or 'unset'} · events {info.event_logger or 'unset'}"
     if info.log_driver != "journald" or info.event_logger != "journald":
         return False, f"{detail}; rerun install.sh"
@@ -227,35 +226,29 @@ async def _journal(yard: Yard) -> tuple[bool, str]:
     return True, str(yard.config.journal_dir)
 
 
-async def _container_logs(yard: Yard) -> tuple[bool, str]:
+def _container_logs(listed: dict[str, podman.Container] | YardError, inspected: str | YardError) -> tuple[bool, str]:
     """Every running container must already log to journald."""
-    try:
-        listed = podman.parse_ps(await yard.podman.run("ps", "--format", "json"))
-        running = [item.name for item in listed.values() if item.running]
-        if not running:
-            return True, "0 containers"
-        types = podman.parse_log_types(await yard.podman.run("inspect", *running))
-    except YardError as exc:
-        return False, f"{exc}; check podman on the host"
+    if isinstance(listed, YardError) or isinstance(inspected, YardError):
+        return False, f"{listed if isinstance(listed, YardError) else inspected}; check podman on the host"
+    running = [name for name, item in listed.items() if item.running]
+    if not running:
+        return True, "0 containers"
+    types = podman.parse_log_types(inspected)
     stale = [name for name in running if types.get(name, "") != "journald"]
     if stale:
         return False, f"redeploy to switch: {', '.join(sorted(stale))}"
     return True, f"{len(running)} containers"
 
 
-async def _healthchecks(yard: Yard) -> list[Check]:
-    """One row per app container's HEALTHCHECK. The yard app has none on purpose."""
+def _healthchecks(yard: Yard, inspected: str | YardError) -> list[Check]:
+    """One row per app container's HEALTHCHECK. An app with no container earns none."""
+    if isinstance(inspected, YardError):
+        return []  # the podman and container logs rows already fail
+    found = podman.parse_health(inspected)
     checks = []
     for app in yard.store.list_apps():
-        if app.name == "yard":
-            continue
         container = app_container(app.name)
-        try:
-            found = podman.parse_health(await yard.podman.run("inspect", container, "--format", "json"))
-        except YardError:
-            continue  # no app container yet, or podman is down (its own row covers that)
-        health = found.get(container)
-        if health is not None:
+        if (health := found.get(container)) is not None:
             checks.append(_healthcheck(app.name, container, health))
     return checks
 
@@ -308,8 +301,10 @@ def _prune(yard: Yard) -> tuple[bool, str, bool]:
     return True, f"{base}; last {_ago(yard.last_prune)}, freed {format_bytes(yard.last_prune_freed)}", False
 
 
-async def _https(host: str, path: str) -> tuple[bool, str]:
+async def _https(host: str, app: str) -> tuple[bool, str]:
+    """One GET through Caddy: /health for Yard, / for an app. A 5xx fails."""
     # Yard shares Caddy's network, so the check dials the service name.
+    path = "/health" if app == "yard" else "/"
     request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
 
     def round_trip() -> bytes:
@@ -322,9 +317,14 @@ async def _https(host: str, path: str) -> tuple[bool, str]:
         line = await asyncio.to_thread(round_trip)
     except (OSError, ssl.SSLError) as exc:
         return False, f"{exc}; yard logs yard-caddy-1"
-    if line.startswith(b"HTTP/"):
-        return True, line.decode(errors="replace").strip()
-    return False, (line.decode(errors="replace").strip() or "no answer") + "; yard logs yard-caddy-1"
+    text = line.decode(errors="replace").strip()
+    if not line.startswith(b"HTTP/"):
+        return False, (text or "no answer") + "; yard logs yard-caddy-1"
+    # Caddy answers 502 for an app that is down: a 5xx is the app's failure, not an answer.
+    code = text.split(" ", 2)[1] if text.count(" ") else ""
+    if code.startswith("5"):
+        return False, f"{text}; yard logs {app_container(app)}"
+    return True, text
 
 
 async def _dns(host: str) -> tuple[bool, str]:

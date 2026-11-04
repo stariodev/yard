@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import secrets
 from dataclasses import dataclass
@@ -315,8 +316,12 @@ class Store:
                 help_text="Run yard token ls.",
             )
         path.unlink()
+        if name == "admin":
+            # The first-boot copy of the plain token goes with it.
+            (self.root / "tokens" / "admin.token").unlink(missing_ok=True)
 
     def token_ok(self, plain: str) -> Token | None:
+        """The token whose stored hash matches. Each file is read once."""
         if not plain:
             return None
         digest = token_hash(plain)
@@ -324,12 +329,9 @@ class Store:
         if not base.is_dir():
             return None
         for path in base.iterdir():
-            token = self._token(path)
-            if token is None:
-                continue
-            lines = path.read_text().splitlines()
-            if len(lines) >= 2 and lines[1] == digest:
-                return token
+            lines = self._token_lines(path)
+            if len(lines) >= 2 and hmac.compare_digest(lines[1], digest):
+                return Token(path.name, lines[0])
         return None
 
     def _check_runs(self, app: App, runs: str) -> str:
@@ -383,12 +385,14 @@ class Store:
         atomic_write(path, format_env(env))
 
     def _token(self, path: Path) -> Token | None:
+        lines = self._token_lines(path)
+        return Token(path.name, lines[0]) if len(lines) >= 2 else None
+
+    def _token_lines(self, path: Path) -> list[str]:
+        """The created stamp and the hash of a token file; [] for anything else in tokens/."""
         if not path.is_file() or path.suffix == ".token" or not _name_ok(path.name):
-            return None
-        lines = path.read_text().splitlines()
-        if len(lines) < 2:
-            return None
-        return Token(path.name, lines[0])
+            return []
+        return path.read_text().splitlines()
 
 
 def _name_ok(name: str) -> bool:
@@ -402,7 +406,7 @@ def _name_ok(name: str) -> bool:
 def _read_app(name: str, text: str) -> App:
     fields = {
         "repo": "",
-        "ref": "main",
+        "ref": "",
         "trigger": "push",
         "created": "",
         "runs": "",
@@ -422,7 +426,8 @@ def _read_app(name: str, text: str) -> App:
 
 
 def ensure_admin(store: Store) -> str:
-    if any(token.name == "admin" for token in store.list_tokens()):
+    """The first token, on a host with none. A deleted admin stays deleted: another token removed it."""
+    if store.list_tokens():
         return ""
     plain = store.create_token("admin")
     atomic_write(store.root / "tokens" / "admin.token", plain + "\n")

@@ -22,6 +22,8 @@ APP_COMPOSE = f"{APPLY_DIR}/app.compose.yml"
 BUILD_COMPOSE = f"{APPLY_DIR}/build.compose.yml"
 COMPOSE_NAMES = ("compose.yml", "compose.yaml", "ops/compose.yml", "ops/compose.yaml")
 DOCKERFILES = ("Containerfile", "Dockerfile", "ops/Containerfile", "ops/Dockerfile")
+# 4 bytes a character at most: the tail stays under the 128 KiB of one argv string on Linux.
+_LOG_CHARS = 30_000
 
 
 def image_tag(name: str, sha: str, template: str = "") -> str:
@@ -152,7 +154,7 @@ async def record_failure(config: Config, app: str, labels: dict[str, str], lines
         "--entrypoint",
         "sh",
         "-e",
-        "YARD_LOG=" + "\n".join(lines),
+        "YARD_LOG=" + "\n".join(lines)[-_LOG_CHARS:],
         "localhost/yard-apply",
         "-c",
         'printf "%s\\n" "$YARD_LOG"; exit 1',

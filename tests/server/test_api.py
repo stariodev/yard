@@ -403,16 +403,12 @@ async def test_origin_hook_marks_the_delivery(yard, monkeypatch):
     client, token, _root = yard
     monkeypatch.setattr(Origin, "connected", lambda self: True)
 
-    async def fake_get_app(self):
-        return {"displayName": "yard"}
-
     async def fake_find(self):
         return [{"id": "ins_1", "account": "org", "selection": "all"}]
 
     async def fake_token(self, repo: str = ""):
         return "tok"
 
-    monkeypatch.setattr(Origin, "get_app", fake_get_app)
     monkeypatch.setattr(Origin, "find_installations", fake_find)
     monkeypatch.setattr(Origin, "token", fake_token)
 
@@ -552,16 +548,12 @@ async def test_github_hook_needs_a_secret(yard, monkeypatch):
     client, token, root = yard
     monkeypatch.setattr(GitHub, "connected", lambda self: True)
 
-    async def fake_get_app(self):
-        return {"name": "yard"}
-
     async def fake_find(self):
         return [{"id": "101", "account": "org", "selection": "all"}]
 
     async def fake_token(self, repo: str = ""):
         return "tok"
 
-    monkeypatch.setattr(GitHub, "get_app", fake_get_app)
     monkeypatch.setattr(GitHub, "find_installations", fake_find)
     monkeypatch.setattr(GitHub, "token", fake_token)
 

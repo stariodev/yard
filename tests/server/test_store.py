@@ -66,6 +66,25 @@ def test_ensure_admin_writes_the_token_once(tmp_path):
     assert ensure_admin(store) == ""
 
 
+def test_a_deleted_admin_stays_deleted(tmp_path):
+    """Another token removed admin. The next boot makes no new admin, and the plain copy is gone."""
+    store = Store.open(tmp_path)
+    plain = ensure_admin(store)
+    store.create_token("ci")
+    store.delete_token("admin", actor="ci")
+    assert not (tmp_path / "tokens" / "admin.token").exists()
+    assert ensure_admin(store) == ""
+    assert store.token_ok(plain) is None
+    assert [token.name for token in store.list_tokens()] == ["ci"]
+
+
+def test_a_repo_less_app_reads_back_no_ref(tmp_path):
+    store = Store.open(tmp_path)
+    store.create_app("web", "", runs="docker.io/library/nginx:1.27")
+    assert store.app("web").ref == ""
+    assert store.app("web").trigger == "push"
+
+
 def test_trigger_is_push_or_manual(tmp_path):
     store = Store.open(tmp_path)
     with pytest.raises(YardError, match="trigger must be"):
