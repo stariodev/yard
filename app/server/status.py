@@ -409,7 +409,7 @@ def disk_capacity(path: Path) -> int:
                 return 0
             current = current.parent
             continue
-        return int(stats.f_blocks) * int(stats.f_frsize)
+        return stats.f_blocks * stats.f_frsize
 
 
 async def _container_tail(yard: Yard, name: str) -> str:

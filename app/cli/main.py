@@ -520,7 +520,7 @@ def _rm_preview(session: client.Client, name: str) -> None:
     app_dir = str(page.get("dir") or "")
     rows = [row for row in page.get("rows") or [] if isinstance(row, dict)]
     containers = ", ".join(str(row["container"]) for row in rows if row.get("container"))
-    data = sum(int(row.get("data") or 0) for row in rows if isinstance(row.get("data"), int))
+    data = sum((row.get("data") or 0) for row in rows if isinstance(row.get("data"), int))
     hosts = [str(host) for host in page.get("hosts") or []]
     print(f"This deletes the app {name}:")
     print(f"  {'containers'.ljust(10)}  {containers or '(none)'}")
