@@ -90,6 +90,7 @@ src = ["app", "tests"]
 exclude = [".venv", "__pycache__", ".agents", ".claude", ".cursor"]
 
 [tool.ruff.lint]
+ignore = ["E501"]  # ruff format owns the line length
 select = ["E", "F", "I", "UP", "B"]
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
