@@ -61,7 +61,7 @@ The docs at [stario.dev/yard](https://stario.dev/yard) read as a short book:
 ```sh
 uv run pytest
 uv run python -m app.server.main
-just check                       # ruff, format, pyright, pytest
+just check                       # ruff, format, pyrefly, pytest
 ```
 
 The code layout is in [`AGENTS.md`](AGENTS.md). Changes are in [`CHANGELOG.md`](CHANGELOG.md).

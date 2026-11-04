@@ -601,7 +601,7 @@ def _cmd_env_edit(args: argparse.Namespace) -> None:
     try:
         env = parse_env(text)
     except YardError as exc:
-        client.fail(exc)
+        return client.fail(exc)
     raw = client.api(session, "PUT", f"/api/v1/apps/{quote(name)}/env", env)
     if client.out.json:
         print(raw)

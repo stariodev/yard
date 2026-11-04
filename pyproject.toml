@@ -52,7 +52,7 @@ module-root = ""
 dev = [
     "hypothesis>=6.130",
     "orjson>=3.13.0",
-    "pyright>=1.1.403",
+    "pyrefly>=1.4",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.12.8",
@@ -77,15 +77,10 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
-pythonVersion = "3.14"
-typeCheckingMode = "standard"
-include = ["app", "tests"]
-exclude = ["**/.venv", "**/__pycache__", "**/node_modules"]
-reportMissingImports = true
-reportMissingModuleSource = false
+[tool.pyrefly]
+python-version = "3.14"
+project-includes = ["app", "tests"]
+project-excludes = ["**/.venv", "**/__pycache__", "**/node_modules"]
 
 [tool.ruff]
 target-version = "py314"
