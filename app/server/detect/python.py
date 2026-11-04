@@ -57,7 +57,8 @@ def plan(repo: Repo, name: str, *, reason: str) -> Plan:
         packaged = repo.pyproject.get("tool", {}).get("uv", {}).get("package", bool(repo.pyproject.get("build-system")))
         uv = f"--mount=type=bind,from={pin('ghcr.io/astral-sh/uv:0.13.5')},source=/uv,target=/bin/uv"
         install = {
-            "env": " \\\n    UV_COMPILE_BYTECODE=1 \\\n    UV_LINK_MODE=copy \\\n    UV_PYTHON_DOWNLOADS=0",
+            # ARG, not ENV: the RUN steps see them, the running app does not.
+            "args": "\n\nARG UV_COMPILE_BYTECODE=1\nARG UV_LINK_MODE=copy\nARG UV_PYTHON_DOWNLOADS=0",
             "deps": (
                 f"RUN {uv} \\\n"
                 "    --mount=type=cache,target=/root/.cache/uv \\\n"
@@ -75,7 +76,7 @@ def plan(repo: Repo, name: str, *, reason: str) -> Plan:
     else:
         answer = "yard:python-pip"
         install = {
-            "env": "",
+            "args": "",
             "deps": (
                 "RUN --mount=type=cache,target=/root/.cache/pip \\\n"
                 "    --mount=type=bind,source=requirements.txt,target=requirements.txt \\\n"
