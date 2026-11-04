@@ -33,8 +33,6 @@ def _bins(tmp_path: Path) -> Path:
     (bin_dir / "docker-compose").chmod(0o755)
     (bin_dir / "podman-remote").write_text('#!/bin/sh\necho "podman:$*" >> "$CALL_LOG"\nexit 0\n')
     (bin_dir / "podman-remote").chmod(0o755)
-    (bin_dir / "wget").write_text('#!/bin/sh\necho "wget:$*" >> "$CALL_LOG"\nexit "${WGET_CODE:-0}"\n')
-    (bin_dir / "wget").chmod(0o755)
     return bin_dir
 
 
@@ -72,33 +70,6 @@ def test_up_builds_starts_and_reports_ready(tmp_path: Path):
     assert re.search(r"^built \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", out, re.MULTILINE)
     assert "dc:build" in log
     assert "dc:up -d --wait --wait-timeout 120 --remove-orphans --no-build" in log
-
-
-def test_up_probes_the_url_once_the_container_runs(tmp_path: Path):
-    code, out, log, _err = _run(tmp_path, "up", PROBE_URL="http://yard:8000/health")
-    assert code == 0
-    assert "== probe http://yard:8000/health" in out
-    assert log.count("wget:") == 1
-
-
-def test_up_reverts_when_the_probe_gets_no_answer(tmp_path: Path):
-    code, out, log, _err = _run(
-        tmp_path,
-        "up",
-        PROBE_URL="http://yard:8000/health",
-        PROBE_SECONDS="2",
-        WGET_CODE="1",
-        PREVIOUS_IMAGE="localhost/heldso:old",
-    )
-    assert code == 3
-    assert "== unhealthy: no answer at http://yard:8000/health" in out
-    assert "== reverted localhost/heldso:old" in out
-
-
-def test_up_without_a_probe_url_asks_nothing(tmp_path: Path):
-    code, _out, log, _err = _run(tmp_path, "up")
-    assert code == 0
-    assert "wget:" not in log
 
 
 def test_up_reuses_the_image_when_skip_build_is_set(tmp_path: Path):

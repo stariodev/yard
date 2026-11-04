@@ -67,8 +67,6 @@ def run_env(config: Config, app: App, checkout: Path, image: str, sha: str) -> d
         env["YARD_ROOT"] = str(config.root)
         env["YARD_PODMAN_SOCK"] = sock
         env["YARD_PODMAN_DIR"] = str(Path(sock).parent)
-        # Yard has no healthcheck: the apply waits for the new process to answer, then reverts if it does not.
-        env["PROBE_URL"] = "http://yard:8000/health"
     return env
 
 

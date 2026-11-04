@@ -124,9 +124,6 @@ def test_the_yard_app_gets_its_host_paths_from_config(tmp_path: Path):
     assert found.env["YARD_ROOT"] == str(tmp_path)
     assert found.env["YARD_PODMAN_SOCK"] == "/run/podman.sock"
     assert found.env["YARD_PODMAN_DIR"] == "/run"
-    # Yard has no healthcheck: its apply probes /health. No other app gets the probe.
-    assert found.env["PROBE_URL"] == "http://yard:8000/health"
-    assert "PROBE_URL" not in run_env(config, _app("heldso"), checkout, "x", "s")
     other = run_env(replace(config, podman_sock=""), _app("yard"), checkout, "x", "s")
     assert other["YARD_PODMAN_SOCK"] == "/run/podman/podman.sock"
 

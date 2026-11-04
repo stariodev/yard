@@ -241,17 +241,12 @@ def _container_logs(listed: dict[str, podman.Container] | YardError, inspected: 
 
 
 def _healthchecks(yard: Yard, inspected: str | YardError) -> list[Check]:
-    """One row per app container's HEALTHCHECK. An app with no container earns none.
-
-    The yard app has none on purpose: its deploy probes /health once instead.
-    """
+    """One row per app container's HEALTHCHECK. An app with no container earns none."""
     if isinstance(inspected, YardError):
         return []  # the podman and container logs rows already fail
     found = podman.parse_health(inspected)
     checks = []
     for app in yard.store.list_apps():
-        if app.name == "yard":
-            continue
         container = app_container(app.name)
         if (health := found.get(container)) is not None:
             checks.append(_healthcheck(app.name, container, health))

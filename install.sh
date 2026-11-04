@@ -343,7 +343,6 @@ run_yard podman run --replace --name deploy-yard --network yard \
   -e APP_ENV="$root/apps/yard/env" -e CHECKOUT="$src" -e DATA_DIR="$root/apps/yard/data" \
   -e IMAGE="localhost/yard:$short" -e SHA="$sha" -e PROJECT_NAME=yard \
   -e YARD_ROOT="$root" -e YARD_PODMAN_SOCK="$sock" -e YARD_PODMAN_DIR="/run/user/${uid}/podman" \
-  -e PROBE_URL=http://yard:8000/health \
   localhost/yard-apply up || die "The first deploy failed." "Hint: podman logs deploy-yard"
 
 i=0

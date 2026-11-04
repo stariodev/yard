@@ -32,7 +32,14 @@ services:
       YARD_ROOT: ${YARD_ROOT}
       YARD_PODMAN_SOCK: ${YARD_PODMAN_SOCK}
       CONTAINER_HOST: unix:///run/podman/podman.sock
-    # No healthcheck: a recurring probe burns CPU and fills the log. The deploy probes /health once (PROBE_URL).
+    # The deploy gate: `up --wait` waits for healthy, and a Yard that never answers reverts to the last image.
+    # Podman's compat API drops start_interval, so the first check runs one interval after start.
+    # One static curl a minute; 0.3.0 dropped a Python probe every 2 s that took half the idle CPU.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 2
 
   caddy:
     image: docker.io/library/caddy:2

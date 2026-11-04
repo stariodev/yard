@@ -418,14 +418,14 @@ def test_doctor_healthcheck_ok(tmp_path: Path):
     assert row == {"name": "healthcheck heldso", "ok": True, "detail": "every 10s · healthy", "warn": False}
 
 
-def test_doctor_skips_the_yard_healthcheck_and_inspects_once(tmp_path: Path):
-    """The yard deploy probes /health instead, so yard earns no row. One inspect covers every container."""
+def test_doctor_reads_every_healthcheck_in_one_inspect(tmp_path: Path):
+    """Yard has a healthcheck too. One inspect covers the running containers and the app containers."""
     yard_ok = HEALTH_OK.replace("/heldso-app-1", "/yard-app-1")
     yard = _yard(tmp_path, ps=CADDY_PS, inspect=yard_ok[:-1] + "," + HEALTH_OK[1:])
     yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
     found = _run(yard)
-    assert "healthcheck yard" not in found
+    assert found["healthcheck yard"]["ok"]
     assert found["healthcheck heldso"]["ok"]
     assert isinstance(yard.podman, FakePodman)
     assert [call[0] for call in yard.podman.calls].count("inspect") == 1
