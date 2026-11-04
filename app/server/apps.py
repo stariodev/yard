@@ -635,7 +635,10 @@ def _debounce(yard: Yard, key: str, run: Callable[[], Awaitable[object]]) -> boo
 
 
 async def _trailing(yard: Yard, key: str) -> None:
-    await asyncio.sleep(max(0.0, _DEBOUNCE - (time.monotonic() - yard.checked[key])))
+    if not await yard.pause(max(0.0, _DEBOUNCE - (time.monotonic() - yard.checked[key]))):
+        # Shutdown drops the queued check; the timer check after the next boot finds the ref.
+        yard.queued.pop(key, None)
+        return
     run = yard.queued.pop(key)
     yard.checked[key] = time.monotonic()
     await run()
@@ -679,8 +682,7 @@ async def _check_repo(yard: Yard, repo: str) -> None:
 
 async def loop(yard: Yard) -> None:
     """One loop that asks the forges for the watched refs on a timer."""
-    while True:
-        await asyncio.sleep(yard.config.check_seconds)
+    while await yard.pause(yard.config.check_seconds):
         try:
             await check_all(yard)
         except Exception as exc:
@@ -689,7 +691,8 @@ async def loop(yard: Yard) -> None:
 
 async def prune_loop(yard: Yard) -> None:
     """The daily prune. The first run waits ten minutes so the boot deploys settle."""
-    await asyncio.sleep(600)
+    if not await yard.pause(600):
+        return
     while True:
         try:
             found = await prune(yard, yard.config.prune_days, False, actor="auto")
@@ -700,7 +703,8 @@ async def prune_loop(yard: Yard) -> None:
             yard.last_prune = now()
             yard.last_prune_freed = found.freed
             yard.last_prune_error = ""
-        await asyncio.sleep(24 * 3600)
+        if not await yard.pause(24 * 3600):
+            return
 
 
 # The newest images of each app that a prune keeps beyond the running one, for a rollback by hand.

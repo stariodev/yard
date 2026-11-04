@@ -85,6 +85,24 @@ class Yard:
     def attach(self, app: StarioApp) -> None:
         self.stario = app
 
+    async def pause(self, seconds: float) -> bool:
+        """Sleep ``seconds``. False when the app shuts down first: the caller stops.
+
+        A background loop that sleeps with plain ``asyncio.sleep`` holds the
+        shutdown for the whole grace period before Stario cancels it.
+        """
+        if self.stario is None:
+            await asyncio.sleep(seconds)
+            return True
+        if self.stario.shutting_down:
+            return False
+        try:
+            # `shutdown` is a shield: the timeout cancels it, not the app's future.
+            await asyncio.wait_for(self.stario.shutdown, seconds)
+        except TimeoutError:
+            return True
+        return False
+
     def spawn(self, coro) -> asyncio.Task:
         """Background work from a request. The app tracks it when it can."""
         if self.stario is not None:
