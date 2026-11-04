@@ -49,31 +49,40 @@ def plan(repo: Repo, name: str, *, reason: str) -> Plan:
                 f"found a {reason.split(':', 1)[0].strip().capitalize()} app but no app/main.py, main.py, or app.py",
                 help_text="Add one of those files, or add a Containerfile.",
             )
+    # One stage: the venv layer stays cached until the lock changes, so a code-only deploy
+    # writes only the source layer. uv is bind-mounted and never lands in the image.
     if repo.exists("uv.lock"):
         answer = "yard:python-uv"
+        # uv installs the project when tool.uv.package says so, else when there is a build-system.
+        packaged = repo.pyproject.get("tool", {}).get("uv", {}).get("package", bool(repo.pyproject.get("build-system")))
+        uv = f"--mount=type=bind,from={pin('ghcr.io/astral-sh/uv:0.13.5')},source=/uv,target=/bin/uv"
         install = {
-            "builder": f"COPY --from={pin('ghcr.io/astral-sh/uv:0.13.5')} /uv /uvx /bin/\n\n"
-            "ENV UV_COMPILE_BYTECODE=1 \\\n"
-            "    UV_LINK_MODE=copy \\\n"
-            "    UV_PYTHON_DOWNLOADS=0",
+            "env": " \\\n    UV_COMPILE_BYTECODE=1 \\\n    UV_LINK_MODE=copy \\\n    UV_PYTHON_DOWNLOADS=0",
             "deps": (
-                "RUN --mount=type=cache,target=/root/.cache/uv \\\n"
+                f"RUN {uv} \\\n"
+                "    --mount=type=cache,target=/root/.cache/uv \\\n"
                 "    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \\\n"
                 "    --mount=type=bind,source=uv.lock,target=uv.lock \\\n"
                 "    uv sync --locked --no-install-project --no-dev"
             ),
-            "project": "RUN --mount=type=cache,target=/root/.cache/uv \\\n    uv sync --locked --no-dev",
-            "env": 'ENV PATH="/workspace/.venv/bin:$PATH"',
+            # Only a packaged project installs itself; this step runs after every code change.
+            "project": (
+                f"\nRUN {uv} \\\n    --mount=type=cache,target=/root/.cache/uv \\\n    uv sync --locked --no-dev\n"
+                if packaged
+                else ""
+            ),
         }
     else:
         answer = "yard:python-pip"
         install = {
-            "builder": "RUN python -m venv /workspace/.venv",
+            "env": "",
             "deps": (
-                "COPY requirements.txt ./\n\nRUN /workspace/.venv/bin/pip install --no-cache-dir -r requirements.txt"
+                "RUN --mount=type=cache,target=/root/.cache/pip \\\n"
+                "    --mount=type=bind,source=requirements.txt,target=requirements.txt \\\n"
+                "    python -m venv /workspace/.venv && \\\n"
+                "    /workspace/.venv/bin/pip install -r requirements.txt"
             ),
             "project": "",
-            "env": 'ENV PATH="/workspace/.venv/bin:$PATH"',
         }
     return plan_template(
         answer, reason, name, template="python", python=pin(f"python:{_version(repo)}-slim-trixie"), cmd=cmd, **install

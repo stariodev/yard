@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The Python templates (`yard:python-uv` and `yard:python-pip`) build in one stage. The venv layer stays cached until `uv.lock` or `requirements.txt` changes, so a code-only deploy writes only the source layer: 1.5 MB for honorata, where it wrote 148 MB before. Before, the final stage copied all of `/workspace` from a builder stage, so each deploy wrote the venv again. uv is bind-mounted for the build and is not in the image. A packaged project (a `build-system`) still runs a second `uv sync` after the source copy. pip keeps its download cache in a cache mount.
+
 - Prune runs `podman image prune --external`, so it also removes old untagged images that a build container from a stopped build still names. Before, on 2026-11-04, Podman removed part of the images and then refused with "image is in use by a container". Yard then failed the prune, so it wrote no event and no `freed`. A refusal is now `untagged_error` in the report and in the prune event, and the rest of the report still counts.
 - `yard prune` waits up to 10 minutes for the answer, and the `image prune` call gets the same limit. Before, both stopped at 30 s and 20 s, while a prune of 345 images took 51 s.
 
