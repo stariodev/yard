@@ -57,7 +57,7 @@ def _serve(answer: tuple[int, bytes]) -> tuple[Caddy, _Admin]:
     server = _Admin(str(sock), _Handler)
     server.answer = answer
     server.calls = []
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     return Caddy(sock), server
 
 

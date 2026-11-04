@@ -287,7 +287,7 @@ def _manifest_run(session: client.Client, args: argparse.Namespace, pending_path
     server.manifest_code = got
     base = f"http://127.0.0.1:{server.server_address[1]}"
     server.manifest_page = _manifest_page(session, args, base, state)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     try:
         print("Opening the GitHub App form. Keep the name or change it, then click Create GitHub App.")
