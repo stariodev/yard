@@ -1,49 +1,43 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
-- `yard prune --dry-run` says "at least N untagged build images". The dry run counts the untagged images that are old enough now, but Podman's prune also removes the parent layers that it leaves untagged. On 2026-11-04 a dry run counted 4 and the prune removed 11.
+### Breaking
 
-- A check deploys a new explicit `runs` on a push app once, also when the commit stays the same. Before, a move from one path to another (`compose.yml` to `ops/compose.yml`) waited for the next commit, while `yard app set` said "The next check deploys it." A failed try of the new plan is not tried again. An auto app compares the commit only, as before. `yard app set --runs auto` on a push app no longer promises a check deploy: auto changes nothing until the next commit.
+- Upgrade a 0.10 host through 0.11 first. The 0.11 move from the bind routes is gone, and so is the `caddy.import` event. A forge `state.json` from before 0.10, with `installation_id` at the top level, no longer reads.
+- `GET /api/v1/events` reads forward from a start: `after` (the `cursor` of a row) or `since`, the last hour by default. It answers the first `lines` rows, oldest first. Before, it read up to 50 000 journal entries of the last day and answered the last rows. A follow with no start begins now, like `podman events`.
+- `yard events --tail` is now `--lines`. `--after <cursor>` reads the next page, and a full page prints that command on stderr.
 
-- The `yard:python-uv` template sets `UV_COMPILE_BYTECODE`, `UV_LINK_MODE`, and `UV_PYTHON_DOWNLOADS` with `ARG`, not `ENV`. The build still uses them, but the running app no longer has them in its environment.
-- The Python templates (`yard:python-uv` and `yard:python-pip`) build in one stage. The venv layer stays cached until `uv.lock` or `requirements.txt` changes, so a code-only deploy writes only the source layer: 1.5 MB for honorata, where it wrote 148 MB before. Before, the final stage copied all of `/workspace` from a builder stage, so each deploy wrote the venv again. uv is bind-mounted for the build and is not in the image. A packaged project (a `build-system`) still runs a second `uv sync` after the source copy. pip keeps its download cache in a cache mount.
+### Deploys
 
-- Prune runs `podman image prune --external`, so it also removes old untagged images that a build container from a stopped build still names. Before, on 2026-11-04, Podman removed part of the images and then refused with "image is in use by a container". Yard then failed the prune, so it wrote no event and no `freed`. A refusal is now `untagged_error` in the report and in the prune event, and the rest of the report still counts.
-- `yard prune` waits up to 10 minutes for the answer, and the `image prune` call gets the same limit. Before, both stopped at 30 s and 20 s, while a prune of 345 images took 51 s.
+- The deploy container `deploy-<name>` is the only deploy record. Yard writes all its labels when it creates the container: the new plan (`yard.sha`, `yard.runs`, `yard.kind`, ...) and the plan before it (`yard.before.*`). Nothing is written after the deploy. Before, a Yard self-deploy in the middle of another deploy lost the record, and the check loop deployed the same revision again.
+- Yard no longer reads or writes `apps/<name>/deployed`. An upgraded host can delete it. The `deploy.start` and `deploy.end` journal events are gone: `yard events` makes those rows from the Podman events of `deploy-<name>`, with the same shape.
+- A running `deploy-<name>` container is the deploy lock, also after a Yard restart. Yard removes the last container with a plain `podman rm` and never uses `--replace`. A check, a webhook, or `POST /api/v1/apps/{name}/deploy` that finds a running deploy follows it, then checks again. Before, each push replaced the running deploy.
+- A check deploys a new explicit `runs` on a push app once, also when the commit stays the same. `yard app set --runs auto` no longer promises a check deploy.
+- The check loop runs one `podman ps -a` for each round. The apps of a round check side by side, so a slow build of one app does not delay the others.
+- The Python templates build in one stage. A code-only deploy writes only the source layer: 1.5 MB for honorata, where it wrote 148 MB before. uv is bind-mounted for the build and is not in the image. `yard:python-uv` sets its `UV_*` build variables with `ARG`, so the app env does not carry them.
+- A URL app deploy removes its old compose copies. A failure record keeps the last 30 000 characters of the deploy log.
 
-- Prune keeps the 3 newest images of each app, plus the image that runs, and removes the other unused app images at once. Before, it kept every image newer than 7 days. Each build of a Yard template copies its venv into a layer of its own, about 250 MB, so a host that deployed 136 times in a week kept about 27 GB and the prune removed nothing.
-- Prune then runs `podman image prune` for the untagged build images older than `days`. The newer ones stay as the build cache. The report gains `untagged`, the count of those images. `freed` is now how much the image store shrank (`podman system df` before and after). Before, it added up the full size of each image, shared layers included. A dry run reports no `freed`.
-- Breaking: `GET /api/v1/events` reads forward from a start: `after` (a row's cursor) or `since`, which defaults to the last hour. The answer is the first `lines` rows from there, oldest first, and each row has a `cursor`. Before, the route read up to 50 000 journal entries of the last day and answered the last `lines` rows. A follow with no start begins now, like `podman events`; with `since` or `after` it replays from there.
-- The events route asks the journal for the container events it shows (create, start, stop, kill, died, restart, remove, pause, unpause) and Yard's own events. Podman's API access log, `sync`, `exec`, and `health_status` share `SYSLOG_IDENTIFIER=podman`. On the production host they were 96% of an hour, so 50 000 entries did not cover one day.
-- Breaking: `yard events --tail` is now `--lines`: the rows from the start, oldest first. `--after <cursor>` reads the next page, and a full page prints that command on stderr.
+### Prune
 
-- `yard status --full` fails an `https <host>` row on a 5xx answer. Before, any HTTP status passed, so the row stayed green while Caddy answered 502 for an app that was down. A 4xx still passes: an app may have no page at `/`.
-- The doctor asks the forge nothing new on a sweep. The installation rows read the saved installations (the installation webhook keeps them), and the token row uses the cached token. The `<forge> app` row is gone: the token row fails when the app key fails. Before, each `yard status --full` and each Medic sweep sent `GET /app` and `GET /app/installations` and rewrote `state.json`.
-- The doctor reads Podman once: one `podman info`, one `podman ps -a`, and one `podman inspect` for the log drivers and the healthchecks. Before, it ran `info` twice, `ps` twice, and one `inspect` for each app.
-- The Yard container has a healthcheck: `curl` on `/health` once a minute. `up --wait` waits for it, so a Yard that starts and does not answer reverts to the previous image. Before, it stayed live. Podman's compat API drops `start_interval`, so the first check runs one minute after start. `yard status --full` shows a `healthcheck yard` row.
-- The check loop runs one `podman ps -a` for each round, not one for each app. The apps of a round check side by side, so a slow build of one app no longer delays the check of the others. Each app's deploys still run one at a time.
-- A deploy that waits for the lock of its app no longer replaces the running job. `yard app deploy` and `GET /api/v1/apps/{name}/deploy?follow=1` keep following the deploy that runs.
-- A repo-less app reads back with no ref. Before, its record read back `ref main`.
-- A deleted `admin` token stays deleted. Before, the next boot made a new `admin` token and wrote it to `tokens/admin.token`. Yard now makes the first token only on a host with no token, and removes `admin.token` with the `admin` token.
+- Prune keeps the running image and the 3 newest images of each app. An image older than `days` goes even among those 3. Before, it kept every image newer than 7 days, so a host with 136 deploys in a week kept about 27 GB.
+- Prune then runs `podman image prune --external` for the untagged build images older than `days`. The newer ones stay as the build cache.
+- The report gains `untagged` and `untagged_error`. `freed` is how much the image store shrank. A dry run reports no `freed`, and `yard prune --dry-run` says "at least N" untagged images.
+- `yard prune` waits up to 10 minutes for the answer. Before, it stopped at 30 s.
+
+### Status and doctor
+
+- The Yard container has a healthcheck: `curl` on `/health` once a minute. A Yard that starts and does not answer reverts to the previous image. `yard status --full` shows a `healthcheck yard` row.
+- `yard status --full` fails an `https <host>` row on a 5xx answer. A 4xx still passes.
+- The doctor asks the forge nothing new: it reads the saved installations and the cached token. The `<forge> app` row is gone. The doctor also reads Podman once for each run.
+- `yard status` asks Caddy about each site file once, and again only when the file changes.
+
+### Fixes
+
+- A deleted `admin` token stays deleted. Yard makes the first token only on a host with no token.
 - A token check reads each token file once and compares the hash in constant time.
-- A failure record keeps the last 30 000 characters of the deploy log, so one argv string stays under the Linux limit of 128 KiB.
-
-- The deploy container `deploy-<name>` is the only deploy record. Before, Yard also wrote `apps/<name>/deployed` and the `deploy.end` event after the apply ended. A Yard self-deploy that replaced the process in the middle of another app's deploy lost both: the app ran the new revision, but `yard status` showed the old one, and the check loop deployed the same revision again (seen on 2026-11-02 for stario-site).
-- Yard writes every label when it creates the deploy container: `yard.sha`, `yard.image`, `yard.runs`, `yard.kind`, `yard.reason`, `yard.template`, `yard.cause`, `yard.actor`, `yard.previous`, and the plan that ran before the deploy (`yard.before.revision`, `yard.before.runs`, `yard.before.kind`, `yard.before.reason`, `yard.before.template`). Nothing is written after the deploy.
-- The running revision is the new plan on exit 0, else the plan before the deploy. A host with no labelled deploy container reads the image of `<name>-app-1`: `localhost/<name>:<sha12>-<tpl8>` for a repo app, `<ref>@sha256:...` for an image app. A URL app with no record has no running revision until its next deploy. A 0.11.0 record without the plan labels reads the template from its image.
-- The check loop reads the last tried (revision, template) pair from the deploy container, so a failed pair is not tried again after a restart either.
-- `apps/<name>/deployed` is no longer read or written. An upgraded host can delete it.
-- The `deploy.start` and `deploy.end` journal events are gone. `GET /api/v1/events` makes the `deploy.start` and `deploy.end` rows from Podman's `create` and `died` events of `deploy-<name>`, with the same shape (`source` is `yard`). The status comes from the exit code: 0 is `ok`, 3 is `reverted`, any other code is `failed`. `yard events --event deploy.` works as before. Rows from older Yard versions still come from the journal.
-- A running `deploy-<name>` container is the deploy lock, also after a Yard restart. Before, only the in-memory job stopped a second deploy, and each deploy ran `podman run --replace`. On 2026-11-02 from 21:25 to 21:28, each push replaced the running `deploy-yard`, so three yard self-deploys stopped in the middle and had no `deploy.end`.
-- Yard removes the last deploy container with a plain `podman rm` (no `-f`), then runs the new one without `--replace`. Podman refuses to remove a running container, so a running deploy is never replaced.
-- A check or a webhook that finds a running deploy for another revision follows it. When it ends, the check runs again, so the newest revision still deploys once. The new Yard process after a self-deploy picks up a newer tip the same way.
-- `POST /api/v1/apps/{name}/deploy` joins a running deploy, also after a restart: the job streams the deploy container's log from its first line, and its status comes from the exit code. `yard app deploy` follows it as before.
-- A URL app deploy prunes the old compose copies when it starts. It keeps the running copy and the new one.
-- The deploy job reads the exposed port when the client asks for the job after an ok deploy. The `SHA` env of the Yard container is no longer read.
-- Breaking: upgrade a 0.10 host through 0.11 first. The 0.11 move from the bind routes is gone: a boot with no site file no longer writes default sites from the routes Caddy resumed, and the `caddy.import` event is gone.
-- Breaking: a forge `state.json` from before 0.10 with `installation_id` at the top level no longer reads as one installation, and an installation with no account no longer owns every repo. `yard forge setup` writes the `installations` list; a host that ran it on 0.10 or later has it.
-- `GET /api/v1/status` and `yard status` ask Caddy about each site file once, and again only when the file changes. Before, each status call sent one Caddy `/adapt` request for each app.
+- A repo-less app reads back with no ref.
+- The events route asks the journal only for the events it shows. Podman's API access log filled 96% of an hour on the production host.
 
 ## 0.11.0
 
