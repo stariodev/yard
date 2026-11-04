@@ -137,7 +137,7 @@ def _hook_received(config: Config, forge: Forge, repo: str, kind: str, c: Contex
         f"{forge.name} {kind}",
         forge=forge.name,
         repo=repo,
-        kind=str(kind),
+        kind=kind,
         delivery=delivery,
     )
 
@@ -599,11 +599,11 @@ class HostPage:
         {"entries": [...], "cursor": ...} instead of text lines.
         """
         query = c.req.query
-        lines = _lines(str(query.get("lines") or ""))
-        since = _log_time(str(query.get("since") or ""))
-        until = _log_time(str(query.get("until") or ""))
-        after = str(query.get("after") or "")
-        match = _container_match(str(query.get("container") or ""))
+        lines = _lines(query.get("lines") or "")
+        since = _log_time(query.get("since") or "")
+        until = _log_time(query.get("until") or "")
+        after = query.get("after") or ""
+        match = _container_match(query.get("container") or "")
         log_filter = LogFilter.parse(query.getlist("hide"), query.getlist("only"))
         if query.get("follow") == "1":
             await _stream_journal(self.yard.config, c, w, [match], lines, log_filter)
@@ -647,15 +647,15 @@ class HostPage:
         pass the last one as `after` for the next page. A follow with no start begins now.
         """
         query = c.req.query
-        lines = _lines(str(query.get("lines") or ""))
-        since = _log_time(str(query.get("since") or ""))
-        until = _log_time(str(query.get("until") or ""))
-        after = str(query.get("after") or "")
+        lines = _lines(query.get("lines") or "")
+        since = _log_time(query.get("since") or "")
+        until = _log_time(query.get("until") or "")
+        after = query.get("after") or ""
         want = (
-            str(query.get("app") or ""),
-            str(query.get("container") or ""),
-            str(query.get("source") or ""),
-            str(query.get("event") or ""),
+            (query.get("app") or ""),
+            (query.get("container") or ""),
+            (query.get("source") or ""),
+            (query.get("event") or ""),
         )
         if query.get("follow") == "1":
             await _stream_events(self.yard.config, c, w, since, after, want)

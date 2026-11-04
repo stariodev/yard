@@ -10,7 +10,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -225,7 +225,7 @@ def _free_port() -> int:
 
 
 @contextlib.contextmanager
-def _caddy() -> Iterator[tuple[Path, Caddy, int]]:
+def _caddy() -> Generator[tuple[Path, Caddy, int]]:
     """A real Caddy on a short temp root. The main Caddyfile imports the Yard sites directory."""
     root = Path(tempfile.mkdtemp(prefix="yc-"))
     sites_dir = root / "apps" / "yard" / "caddy" / "config" / "sites"
@@ -263,7 +263,7 @@ def _caddy() -> Iterator[tuple[Path, Caddy, int]]:
 
 
 @pytest.fixture
-def real_caddy() -> Iterator[tuple[Path, Caddy, int]]:
+def real_caddy() -> Generator[tuple[Path, Caddy, int]]:
     with _caddy() as found:
         yield found
 

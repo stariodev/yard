@@ -229,7 +229,7 @@ class _ManifestHandler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path == "/callback":
             params = dict(parse_qsl(parsed.query))
-            code = str(params.get("code") or "")
+            code = params.get("code") or ""
             if params.get("state") != server.manifest_state or not code:
                 self._page(400, "<p>This link does not belong to this setup run. Go back to the terminal.</p>")
                 return
@@ -269,7 +269,7 @@ def _manifest_exchange(session: client.Client, code: str, pending_path: Path) ->
         "url": session.url,
         "app_id": str(reply.get("id") or ""),
         "slug": str(reply.get("slug") or ""),
-        "pem": str(reply.get("pem") or ""),
+        "pem": (reply.get("pem") or ""),
         "webhook_secret": str(reply.get("webhook_secret") or ""),
         "html_url": str(reply.get("html_url") or ""),
         "created": datetime.now(UTC).isoformat(timespec="seconds"),

@@ -315,7 +315,7 @@ async def _https(host: str, app: str) -> tuple[bool, str]:
 
     try:
         line = await asyncio.to_thread(round_trip)
-    except (OSError, ssl.SSLError) as exc:
+    except OSError as exc:  # ssl.SSLError is an OSError
         return False, f"{exc}; yard logs yard-caddy-1"
     text = line.decode(errors="replace").strip()
     if not line.startswith(b"HTTP/"):

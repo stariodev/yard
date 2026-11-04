@@ -157,7 +157,7 @@ def send(config: Config, event: str, message: str, *, priority: int = 6, **field
         ("MESSAGE", message),
         ("PRIORITY", str(priority)),
         ("YARD_EVENT", event),
-        *((f"YARD_{key.upper()}", str(value)) for key, value in fields.items() if str(value)),
+        *((f"YARD_{key.upper()}", value) for key, value in fields.items() if value),
     ]
     datagram = b""
     for key, value in pairs:

@@ -400,7 +400,7 @@ def format_env(env: dict[str, str]) -> str:
     """KEY=value lines that parse_env reads back. A value outside the plain set is a JSON string."""
     lines: list[str] = []
     for key in sorted(env):
-        value = str(env[key])
+        value = env[key]
         # Compose and parse_env both read a double-quoted value with backslash escapes.
         shown = value if value and _PLAIN_VALUE.fullmatch(value) else json.dumps(value, ensure_ascii=False)
         lines.append(f"{key}={shown}\n")
@@ -492,7 +492,7 @@ def age(seconds: float) -> str:
 
 def duration(delta: timedelta) -> str:
     """A span: 350ms, 4.5s, 2m0s, 1h2m3s."""
-    ms = int(round(delta.total_seconds() * 1000))
+    ms = round(delta.total_seconds() * 1000)
     if ms < 1000:
         return f"{ms}ms"
     seconds, frac = divmod(ms, 1000)
