@@ -1730,6 +1730,23 @@ def test_app_set_runs_push_message(monkeypatch: pytest.MonkeyPatch, capsys: pyte
     assert "The next check deploys it. Deploy now" in out
 
 
+def test_app_set_runs_auto_on_a_push_app_promises_no_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """Back to auto changes nothing until the next commit, so the message names the deploy, not a check."""
+
+    def fake_api_try(client, method, path, body, timeout=None):
+        if method == "GET":
+            return 200, json.dumps({"app": {"name": "web", "runs": "ops/compose.yml", "trigger": "push"}})
+        return 200, json.dumps({"app": {"name": "web", "runs": "", "trigger": "push"}})
+
+    _fake_api(monkeypatch, fake_api_try)
+    main(["app", "set", "--app", "web", "--runs", "auto"])
+    out = capsys.readouterr().out
+    assert "The next check deploys it" not in out
+    assert "still runs the old way until the next deploy" in out
+
+
 def test_app_set_runs_manual_message(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     def fake_api_try(client, method, path, body, timeout=None):
         if method == "GET":

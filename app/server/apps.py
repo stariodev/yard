@@ -536,6 +536,8 @@ async def _check(
     tip = yard.tips.setdefault(app.name, Tip())
     tip.error = ""
     tip.revision, tip.template = current
+    # An explicit runs is part of what runs: a new one deploys once. Auto follows the commit, so it adds nothing.
+    current = (current[0], current[1], app.runs)
     if app.trigger != "push":
         return
     if listed is None:
@@ -545,8 +547,12 @@ async def _check(
             log.warning("%s check: %s", app.name, exc)
             return
     deployed = status.running_plan(app, listed) or Deployed()
-    # The last try is on the deploy container too, so a restart does not retry a failed pair.
-    if current in ((deployed.revision, deployed.template), status.last_try(listed, app.name)):
+    tried, tried_template, tried_runs = status.last_try(listed, app.name)
+    # The last try is on the deploy container too, so a restart does not retry a failed plan.
+    if current in (
+        (deployed.revision, deployed.template, deployed.runs if app.runs else ""),
+        (tried, tried_template, tried_runs if app.runs else ""),
+    ):
         return
     moved = _moved(app, deployed, current)
     journal.send(
@@ -578,8 +584,8 @@ def _template_at(clone: Path, app: App) -> str:
         return ""
 
 
-def _moved(app: App, deployed: Deployed, current: tuple[str, str]) -> str:
-    """What the check saw move: commit, template, image, or file."""
+def _moved(app: App, deployed: Deployed, current: tuple[str, str, str]) -> str:
+    """What the check saw move: commit, template, image, file, or runs."""
     parts = []
     if current[0] != deployed.revision:
         if not app.repo:
@@ -588,6 +594,8 @@ def _moved(app: App, deployed: Deployed, current: tuple[str, str]) -> str:
             parts.append("commit")
     if current[1] != deployed.template:
         parts.append("template")
+    if current[2] and current[2] != deployed.runs:
+        parts.append("runs")
     return " and ".join(parts) or "revision"
 
 
