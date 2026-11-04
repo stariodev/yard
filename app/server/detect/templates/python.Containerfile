@@ -1,7 +1,7 @@
 FROM {{python}}
 
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8000{{env}}
+    PORT=8000{{args}}
 
 WORKDIR /workspace
 

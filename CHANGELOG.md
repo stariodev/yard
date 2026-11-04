@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The `yard:python-uv` template sets `UV_COMPILE_BYTECODE`, `UV_LINK_MODE`, and `UV_PYTHON_DOWNLOADS` with `ARG`, not `ENV`. The build still uses them, but the running app no longer has them in its environment.
 - The Python templates (`yard:python-uv` and `yard:python-pip`) build in one stage. The venv layer stays cached until `uv.lock` or `requirements.txt` changes, so a code-only deploy writes only the source layer: 1.5 MB for honorata, where it wrote 148 MB before. Before, the final stage copied all of `/workspace` from a builder stage, so each deploy wrote the venv again. uv is bind-mounted for the build and is not in the image. A packaged project (a `build-system`) still runs a second `uv sync` after the source copy. pip keeps its download cache in a cache mount.
 
 - Prune runs `podman image prune --external`, so it also removes old untagged images that a build container from a stopped build still names. Before, on 2026-11-04, Podman removed part of the images and then refused with "image is in use by a container". Yard then failed the prune, so it wrote no event and no `freed`. A refusal is now `untagged_error` in the report and in the prune event, and the rest of the report still counts.
