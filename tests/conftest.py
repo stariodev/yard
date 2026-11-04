@@ -1,11 +1,31 @@
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from stario.testing import TestClient
 
 from app.server.main import bootstrap
+
+_LOCAL = {"127.0.0.1", "localhost", "::1"}
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Requests reach only a local test server. Anything else fails at once instead of waiting on a reply."""
+    real = urllib.request.urlopen
+
+    def urlopen(url, *args, **kwargs):
+        full = url.full_url if isinstance(url, urllib.request.Request) else str(url)
+        host = urlsplit(full).hostname or ""
+        if host not in _LOCAL:
+            raise urllib.error.URLError(f"tests do not reach {host}")
+        return real(url, *args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
 
 @asynccontextmanager

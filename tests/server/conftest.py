@@ -1,14 +1,33 @@
 """Service-level helpers: a Yard on a temp root, and a fake Caddy admin."""
 
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from app.server.caddy import Caddy
 from app.server.podman import Podman
 from app.server.store import Config, Store
 from app.server.yard import Yard
 from app.shared import YardError
+from tests.server import fakes
+
+
+@pytest.fixture(autouse=True)
+def _in_process_programs(monkeypatch):
+    real = asyncio.create_subprocess_exec
+
+    async def spawn(program, *args, **kwargs):
+        fake = fakes.FAKES.get(str(program))
+        if fake is None:
+            return await real(program, *args, **kwargs)
+        return fakes.FakeProcess(*fake([str(arg) for arg in args]))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    yield
+    fakes.FAKES.clear()
 
 
 def make_config(tmp_path: Path, **overrides) -> Config:
