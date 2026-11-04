@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `yard prune --dry-run` says "at least N untagged build images". The dry run counts the untagged images that are old enough now, but Podman's prune also removes the parent layers that it leaves untagged. On 2026-11-04 a dry run counted 4 and the prune removed 11.
+
 - A check deploys a new explicit `runs` on a push app once, also when the commit stays the same. Before, a move from one path to another (`compose.yml` to `ops/compose.yml`) waited for the next commit, while `yard app set` said "The next check deploys it." A failed try of the new plan is not tried again. An auto app compares the commit only, as before. `yard app set --runs auto` on a push app no longer promises a check deploy: auto changes nothing until the next commit.
 
 - The `yard:python-uv` template sets `UV_COMPILE_BYTECODE`, `UV_LINK_MODE`, and `UV_PYTHON_DOWNLOADS` with `ARG`, not `ENV`. The build still uses them, but the running app no longer has them in its environment.

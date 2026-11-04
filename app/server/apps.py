@@ -733,7 +733,8 @@ class Report:
     freed: int = 0
     days: int = 0
     dry: bool = False
-    # The untagged build images older than `days`, removed (or found, on a dry run).
+    # The untagged build images older than `days`, removed. A dry run finds the ones that are untagged now;
+    # Podman's prune also takes the parents that it leaves untagged, so the real count can be higher.
     untagged: int = 0
     # Why `podman image prune` stopped part way; "" when it finished.
     untagged_error: str = ""

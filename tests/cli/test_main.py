@@ -797,7 +797,7 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     main(["prune", "--days", "1", "--dry-run"])
     assert seen[("POST", "/api/v1/prune")] == {"days": 1, "dry": True}
     out = capsys.readouterr().out
-    assert "would remove 1 images and 4 untagged build images\n" in out
+    assert "would remove 1 images and at least 4 untagged build images\n" in out
 
 
 def test_login_warns_when_no_forge_is_connected(

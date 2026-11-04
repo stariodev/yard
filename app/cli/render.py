@@ -434,7 +434,9 @@ def format_prune(report: dict) -> str:
     dry = bool(report.get("dry"))
     days = report.get("days") or 7
     head = f"{'would remove' if dry else 'removed'} {len(images) - len(refused)} images"
-    head += f" and {int(report.get('untagged') or 0)} untagged build images"
+    untagged = int(report.get("untagged") or 0)
+    # Podman's prune also takes the parents it leaves untagged: a dry run can only count a minimum.
+    head += f" and {'at least ' if dry else ''}{untagged} untagged build images"
     if not dry:
         head += f", {format_bytes(int(report.get('freed') or 0))} freed"
     lines = [
