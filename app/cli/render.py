@@ -431,11 +431,15 @@ def deploy_attention(status: str) -> str:
 def format_prune(report: dict) -> str:
     images = [row for row in report.get("images") or [] if isinstance(row, dict)]
     refused = [row for row in images if row.get("kept")]
-    word = "would remove" if report.get("dry") else "removed"
+    dry = bool(report.get("dry"))
     days = report.get("days") or 7
+    head = f"{'would remove' if dry else 'removed'} {len(images) - len(refused)} images"
+    head += f" and {int(report.get('untagged') or 0)} untagged build images"
+    if not dry:
+        head += f", {format_bytes(int(report.get('freed') or 0))} freed"
     lines = [
-        f"{word} {len(images) - len(refused)} images, {format_bytes(int(report.get('freed') or 0))}",
-        f"kept: an image a container still uses, and anything newer than {days} days",
+        head,
+        f"kept: an image a container uses, the 3 newest of each app, and untagged images newer than {days} days",
     ]
     for row in refused:
         lines.append(f"kept {row.get('tag')} ({row.get('kept')})")

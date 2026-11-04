@@ -23,12 +23,14 @@ _HELP = "Rerun install.sh to enable journald logs."
 def _argv(
     config: Config,
     matches: list[str],
-    lines: int,
+    lines: int | None,
     since: str = "",
     until: str = "",
     after: str = "",
     follow: bool = False,
+    oldest: bool = False,
 ) -> list[str]:
+    """`lines` None shows every entry of the window. `oldest` (or a cursor) takes the first lines of it."""
     argv = [
         config.journalctl_bin,
         "-D",
@@ -37,9 +39,9 @@ def _argv(
         "-o",
         "json",
         "-n",
-        # "+N" takes the first lines after the cursor; a tail of the window
+        # "+N" takes the first lines after the start; a tail of the window
         # would silently drop the backlog a poller has not seen yet.
-        f"+{lines}" if after else str(lines),
+        "all" if lines is None else f"+{lines}" if after or oldest else str(lines),
     ]
     if since:
         argv += ["--since", since]
@@ -49,7 +51,7 @@ def _argv(
         argv += ["--after-cursor", after]
     if follow:
         argv.append("-f")
-    # Repeating one field name is OR for journalctl.
+    # Repeating one field name is OR for journalctl, different names are AND, and "+" starts another group.
     return argv + matches
 
 
@@ -102,9 +104,10 @@ async def read_entries(
     since: str = "",
     until: str = "",
     after: str = "",
+    oldest: bool = False,
 ) -> list[dict]:
-    """The raw entries, oldest first."""
-    out = await _run(config, _argv(config, matches, lines, since, until, after))
+    """The raw entries, oldest first. `oldest` takes the first `lines` from the start, not the last."""
+    out = await _run(config, _argv(config, matches, lines, since, until, after, oldest=oldest))
     return list(entries(out))
 
 
@@ -112,11 +115,12 @@ async def follow(
     config: Config,
     matches: list[str],
     *,
-    lines: int,
+    lines: int | None,
     since: str = "",
+    after: str = "",
 ) -> asyncio.subprocess.Process:
-    """The follow process. stdout yields one JSON entry per line."""
-    return await _spawn(config, _argv(config, matches, lines, since=since, follow=True))
+    """The follow process. stdout yields one JSON entry per line. `lines` None replays the whole window."""
+    return await _spawn(config, _argv(config, matches, lines, since=since, after=after, follow=True))
 
 
 async def follow_entries(proc: asyncio.subprocess.Process, *, tick: float | None = None) -> AsyncGenerator[dict | None]:

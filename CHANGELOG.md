@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Prune keeps the 3 newest images of each app, plus the image that runs, and removes the other unused app images at once. Before, it kept every image newer than 7 days. Each build of a Yard template copies its venv into a layer of its own, about 250 MB, so a host that deployed 136 times in a week kept about 27 GB and the prune removed nothing.
+- Prune then runs `podman image prune` for the untagged build images older than `days`. The newer ones stay as the build cache. The report gains `untagged`, the count of those images. `freed` is now how much the image store shrank (`podman system df` before and after). Before, it added up the full size of each image, shared layers included. A dry run reports no `freed`.
+- Breaking: `GET /api/v1/events` reads forward from a start: `after` (a row's cursor) or `since`, which defaults to the last hour. The answer is the first `lines` rows from there, oldest first, and each row has a `cursor`. Before, the route read up to 50 000 journal entries of the last day and answered the last `lines` rows. A follow with no start begins now, like `podman events`; with `since` or `after` it replays from there.
+- The events route asks the journal for the container events it shows (create, start, stop, kill, died, restart, remove, pause, unpause) and Yard's own events. Podman's API access log, `sync`, `exec`, and `health_status` share `SYSLOG_IDENTIFIER=podman`. On the production host they were 96% of an hour, so 50 000 entries did not cover one day.
+- Breaking: `yard events --tail` is now `--lines`: the rows from the start, oldest first. `--after <cursor>` reads the next page, and a full page prints that command on stderr.
+
 - `yard status --full` fails an `https <host>` row on a 5xx answer. Before, any HTTP status passed, so the row stayed green while Caddy answered 502 for an app that was down. A 4xx still passes: an app may have no page at `/`.
 - The doctor asks the forge nothing new on a sweep. The installation rows read the saved installations (the installation webhook keeps them), and the token row uses the cached token. The `<forge> app` row is gone: the token row fails when the app key fails. Before, each `yard status --full` and each Medic sweep sent `GET /app` and `GET /app/installations` and rewrote `state.json`.
 - The doctor reads Podman once: one `podman info`, one `podman ps -a`, and one `podman inspect` for the log drivers and the healthchecks. Before, it ran `info` twice, `ps` twice, and one `inspect` for each app.

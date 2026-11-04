@@ -164,8 +164,19 @@ _LOG_ABSOLUTE = re.compile(r"\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?\Z")
 _LOG_RELATIVE = re.compile(r"-(\d+)(s|m|h|d)\Z")
 # journalctl reads -1h and -2d as they are; a bare m means months, so it maps.
 _LOG_UNITS = {"s": "s", "m": "min", "h": "h", "d": "d"}
-# Podman writes container events with SYSLOG_IDENTIFIER=podman; Yard's own events use yard.
-_EVENT_MATCHES = ["SYSLOG_IDENTIFIER=podman", "SYSLOG_IDENTIFIER=yard"]
+# The container events the timeline shows. Podman also writes sync, exec, and health_status on
+# every healthcheck run; its API service writes an access log line for each call, with the same
+# SYSLOG_IDENTIFIER. The journal match drops all of that before Yard reads a line.
+_CONTAINER_EVENTS = ("create", "start", "stop", "kill", "died", "restart", "remove", "pause", "unpause")
+_EVENT_MATCHES = [
+    "SYSLOG_IDENTIFIER=podman",
+    "PODMAN_TYPE=container",
+    *(f"PODMAN_EVENT={event}" for event in _CONTAINER_EVENTS),
+    "+",
+    "SYSLOG_IDENTIFIER=yard",
+]
+# A read with no start shows the last hour.
+_EVENT_SINCE = "-1h"
 _YARD_TOP = {"YARD_EVENT", "YARD_APP", "YARD_CONTAINER", "YARD_ACTOR", "YARD_SHA", "YARD_STATUS"}
 
 
@@ -190,7 +201,7 @@ def _event_row(entry: dict) -> dict | None:
     when = journal.timestamp(entry)
     source = str(entry.get("SYSLOG_IDENTIFIER") or "")
     if source == "podman":
-        if str(entry.get("PODMAN_TYPE") or "") != "container":
+        if str(entry.get("PODMAN_TYPE") or "") != "container" or entry.get("PODMAN_EVENT") not in _CONTAINER_EVENTS:
             return None
         container = str(entry.get("PODMAN_NAME") or "")
         app = ""
@@ -241,6 +252,7 @@ def _event_row(entry: dict) -> dict | None:
         }
     else:
         return None
+    row["cursor"] = str(entry.get("__CURSOR") or "")
     return {key: value for key, value in row.items() if value not in ("", {}, False, None)}
 
 
@@ -273,6 +285,7 @@ def _deploy_row(entry: dict, when: str, app: str, container: str, event: str, la
         "message": message,
         "fields": {key: value for key, value in fields.items() if value},
     }
+    row["cursor"] = str(entry.get("__CURSOR") or "")
     return {key: value for key, value in row.items() if value not in ("", {})}
 
 
@@ -355,11 +368,13 @@ async def _stream_events(
     config: Config,
     c: Context,
     w: Writer,
-    lines: int,
     since: str,
+    after: str,
     want: tuple[str, str, str, str],
 ) -> None:
-    proc = await journal.follow(config, _EVENT_MATCHES, lines=lines, since=since)
+    """Like `podman events`: from now with no start, else every event from the start on."""
+    start = bool(since or after)
+    proc = await journal.follow(config, _EVENT_MATCHES, lines=None if start else 0, since=since, after=after)
     w.headers.set("content-type", "application/x-ndjson")
     w.write_headers(200)
     async with aclosing(journal.follow_entries(proc)) as stream:
@@ -625,11 +640,17 @@ class HostPage:
         w.text("".join(line + "\n" for entry in shown if (line := journal.format_line(entry))))
 
     async def events_get(self, c: Context, w: Writer) -> None:
-        """One merged timeline of Podman and Yard events."""
+        """One merged timeline of Podman and Yard events, read forward from a start.
+
+        The start is `after` (a row's cursor) or `since` (the last hour when neither is given).
+        The answer is the first `lines` rows from there, oldest first, each with its cursor:
+        pass the last one as `after` for the next page. A follow with no start begins now.
+        """
         query = c.req.query
         lines = _lines(str(query.get("lines") or ""))
-        since = _log_time(str(query.get("since") or "")) or "-1d"
+        since = _log_time(str(query.get("since") or ""))
         until = _log_time(str(query.get("until") or ""))
+        after = str(query.get("after") or "")
         want = (
             str(query.get("app") or ""),
             str(query.get("container") or ""),
@@ -637,17 +658,23 @@ class HostPage:
             str(query.get("event") or ""),
         )
         if query.get("follow") == "1":
-            await _stream_events(self.yard.config, c, w, lines, since, want)
+            await _stream_events(self.yard.config, c, w, since, after, want)
             return
-        entries = await journal.read_entries(
-            self.yard.config,
-            _EVENT_MATCHES,
-            lines=50_000,
-            since=since,
-            until=until,
-        )
-        rows = [row for entry in entries if (row := _event_row(entry)) and _event_keeps(row, *want)]
-        w.json(cast(JsonValue, rows[-lines:]))
+        since = "" if after else since or _EVENT_SINCE
+        rows: list[dict] = []
+        # The filters drop rows after the read, so a page of entries can come up short: read on.
+        while len(rows) < lines:
+            entries = await journal.read_entries(
+                self.yard.config, _EVENT_MATCHES, lines=lines, since=since, until=until, after=after, oldest=True
+            )
+            for entry in entries:
+                row = _event_row(entry)
+                if row and _event_keeps(row, *want):
+                    rows.append(row)
+            if len(entries) < lines or not (after := str(entries[-1].get("__CURSOR") or "")):
+                break
+            since = ""
+        w.json(cast(JsonValue, rows[:lines]))
 
 
 @dataclass(frozen=True, slots=True)

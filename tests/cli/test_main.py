@@ -778,6 +778,7 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
                     {"tag": "localhost/busy:t4g", "bytes": 3000, "kept": "image is in use by heldso-app-1"},
                 ],
                 "freed": 3000,
+                "untagged": 4,
                 "days": body["days"],
                 "dry": body["dry"],
             }
@@ -788,12 +789,13 @@ def test_prune(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
     main(["prune"])
     assert seen[("POST", "/api/v1/prune")] == {"days": 7, "dry": False}
     out = capsys.readouterr().out
-    assert "removed 1 images, 3kB" in out
+    assert "removed 1 images and 4 untagged build images, 3kB freed" in out
     assert "kept localhost/busy:t4g (image is in use by heldso-app-1)" in out
 
     main(["prune", "--days", "1", "--dry-run"])
     assert seen[("POST", "/api/v1/prune")] == {"days": 1, "dry": True}
-    assert "would remove" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "would remove 1 images and 4 untagged build images\n" in out
 
 
 def test_login_warns_when_no_forge_is_connected(
@@ -1629,6 +1631,22 @@ def test_events_build_the_query(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
     assert calls[-1] == ("GET", "/api/v1/events?lines=200&since=-1h&app=heldso&source=podman", None)
     out = capsys.readouterr().out
     assert "died" in out and "heldso-app-1 abc123def456" in out and "exit 1" in out
+
+
+def test_events_point_at_the_next_page(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    """A full page prints the --after that reads on; a short page prints nothing more."""
+    calls = []
+
+    def fake_api_try(client, method, path, body, timeout=None):
+        calls.append(path)
+        return 200, json.dumps([{"event": "start", "cursor": "c-1"}, {"event": "died", "cursor": "c-2"}])
+
+    _fake_api(monkeypatch, fake_api_try)
+    main(["events", "--lines", "2", "--after", "c-0"])
+    assert calls[-1] == "/api/v1/events?lines=2&after=c-0"
+    assert "more: yard events --after c-2" in capsys.readouterr().err
+    main(["events", "--lines", "3"])
+    assert "more:" not in capsys.readouterr().err
 
 
 def test_app_cat(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):

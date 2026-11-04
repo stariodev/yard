@@ -409,8 +409,8 @@ def _logs(session: client.Client, container: str, args: argparse.Namespace) -> N
 
 def _cmd_events(args: argparse.Namespace) -> None:
     session = client.load(args)
-    query: dict[str, str] = {"lines": str(args.tail)}
-    for key in ("since", "until", "app", "container", "source", "event"):
+    query: dict[str, str] = {"lines": str(args.lines)}
+    for key in ("since", "until", "after", "app", "container", "source", "event"):
         value = str(getattr(args, key, "") or "")
         if value:
             query[key] = value
@@ -423,7 +423,11 @@ def _cmd_events(args: argparse.Namespace) -> None:
     if args.follow:
         _follow_events(session, path)
         return
-    client.show(client.api(session, "GET", path, None), partial(format_events, color=client.color_on()))
+    raw = client.api(session, "GET", path, None)
+    client.show(raw, partial(format_events, color=client.color_on()))
+    rows = client.object_of(raw)
+    if not client.out.json and isinstance(rows, list) and len(rows) == args.lines and isinstance(rows[-1], dict):
+        print(f"more: yard events --after {rows[-1].get('cursor')}", file=sys.stderr)
 
 
 def _follow_events(session: client.Client, path: str) -> None:
@@ -752,9 +756,12 @@ def _parser() -> argparse.ArgumentParser:
     events.add_argument("--container", default="", help="a container name or id")
     events.add_argument("--source", default="", choices=["", "podman", "yard"], help="podman or yard")
     events.add_argument("--event", default="", help="an event name prefix, like deploy.")
-    events.add_argument("--since", default="", help="-15m, -1h, -2d, or 2025-01-31 14:00")
+    events.add_argument(
+        "--since", default="", help="where the rows start: -15m, -1h (the default), or 2025-01-31 14:00"
+    )
     events.add_argument("--until", default="", help="same forms as --since")
-    events.add_argument("--tail", type=int, default=200, help="how many rows")
+    events.add_argument("--after", default="", help="start after this cursor; a row's cursor in --json")
+    events.add_argument("--lines", type=int, default=200, help="how many rows from the start, oldest first")
     events.add_argument("-f", "--follow", action="store_true", help="stream new events; NDJSON with --json")
     events.set_defaults(func=_cmd_events)
 
