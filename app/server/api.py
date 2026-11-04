@@ -491,7 +491,7 @@ class HostPage:
         w.json(cast(JsonValue, asdict(report)))
 
     async def doctor_run(self, _c: Context, w: Writer) -> None:
-        w.json([asdict(check) for check in await doctor.run(self.yard)])
+        w.json(cast(JsonValue, [asdict(check) for check in await doctor.run(self.yard)]))
 
     async def run_prune(self, c: Context, w: Writer) -> None:
         data = await json_object(c)
@@ -755,7 +755,7 @@ class AppsPage:
             # No deploy runs: the deploy container is the record. A skipped deploy has none.
             record = await status.last_deploy(self.yard, name)
             if record is not None:
-                body = asdict(record)
+                body: dict[str, object] = {**asdict(record)}
                 if record.status == "ok":
                     body["port"] = await apps.exposed_port(self.yard, name)
                 w.json(cast(JsonValue, {"deploy": body}))
@@ -823,7 +823,7 @@ class AppsPage:
             sorted(key for key, value in patch.items() if value is not None),
             sorted(key for key, value in patch.items() if value is None),
         )
-        w.json({"keys": keys})
+        w.json(cast(JsonValue, {"keys": keys}))
 
     async def env_put(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]
@@ -843,7 +843,7 @@ class AppsPage:
         removed = sorted(set(self.yard.store.read_env(name)) - set(env))
         keys = self.yard.store.write_env(name, env)
         _env_set_event(self.yard.config, c, name, sorted(env), removed)
-        w.json({"keys": keys})
+        w.json(cast(JsonValue, {"keys": keys}))
 
     async def caddy_show(self, c: Context, w: Writer) -> None:
         """The site file as text/plain; empty when the app has none."""
@@ -876,7 +876,7 @@ class AccessPage:
         app.add(TOKEN_DELETE, self.tokens_delete, middleware=middleware)
 
     async def tokens_list(self, _c: Context, w: Writer) -> None:
-        w.json([asdict(token) for token in self.yard.store.list_tokens()])
+        w.json(cast(JsonValue, [asdict(token) for token in self.yard.store.list_tokens()]))
 
     async def tokens_create(self, c: Context, w: Writer) -> None:
         data = await json_object(c)

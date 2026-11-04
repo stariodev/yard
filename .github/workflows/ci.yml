@@ -17,5 +17,5 @@ jobs:
       - run: uv sync --extra server --locked
       - run: uv run ruff check app tests
       - run: uv run ruff format --check app tests
-      - run: uv run pyright
+      - run: uv run pyrefly check
       - run: uv run pytest
