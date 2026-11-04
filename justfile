@@ -1,5 +1,7 @@
 # `just` lists the targets. Install: uv tool install rust-just
 
+set shell := ["bash", "-uo", "pipefail", "-c"]
+
 # load secrets/config from .env (gitignored)
 set dotenv-load := true
 
@@ -11,21 +13,23 @@ dev:
 serve:
     uv run python -m app.server.main
 
-# lint, typecheck, test - run before done
+# format, fix lint, typecheck, test - run before done; prints only problems
 check:
+    @uv run ruff format -q .
+    @uv run ruff check -q --fix .
+    @uv run pyrefly check 2>&1 | { grep -v ' INFO ' || true; }
+    @uv run pytest -q --no-header -n auto
+
+# the same checks without changes, for CI
+ci:
     uv run ruff check .
     uv run ruff format --check .
     uv run pyrefly check
     uv run pytest -q -n auto
 
-# auto-fix lint and format
-fix:
-    uv run ruff check --fix .
-    uv run ruff format .
-
 # run the tests
-test:
-    uv run pytest -q -n auto
+test *args:
+    uv run pytest -q --no-header -n auto {{args}}
 
 # refresh the pinned template base digests in detect/bases.json
 bump-bases:

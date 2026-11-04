@@ -14,7 +14,7 @@ Before you call work done, run `just check` (ruff, ruff format, pyrefly, pytest)
 - `Route("GET /apps/{name}")` is one method on one path. `app.add(ROUTE, handler)` registers it; `ROUTE.href(name)` builds the path. No `url_for`, no `app.get`.
 - A literal segment beats a parameter, in any order: `/rooms/live` and `/rooms/{room_id}` both work.
 - `c.match.params`, `c.req.query`, `c.req.cookies`; `c.state` is filled by middleware. Middleware is `(inner: Handler) -> Handler`, added with `app.use("/prefix", mw)`.
-- A long loop iterates `c.alive(source)`. Background work is `c.app.create_task(coro)`, never bare `asyncio.create_task`.
+- A long loop iterates `c.alive(source)`. Background work is `c.app.create_task(coro)`, never bare `asyncio.create_task`. A timer loop reads `shutdown = app.shutdown` once, then ends each pass with `await asyncio.wait({shutdown}, timeout=interval)`, never `asyncio.sleep`, so it stops at once on shutdown.
 - JSON goes through `stario.json` (`w.json`), not `json.dumps`.
 - One process, one event loop. Shared state is an object built in `bootstrap` and passed to the code that registers routes. No module-level state. No `os.environ` outside the config module.
 - Stario does not read `.env`. Settings come from the environment; `set dotenv-load := true` in the `justfile` loads a local `.env`.
