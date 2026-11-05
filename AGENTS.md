@@ -11,7 +11,7 @@ Before you call work done, run `just check` (ruff, ruff format, pyrefly, pytest)
 - Not ASGI: no Uvicorn, FastAPI, or response objects. The main module runs `asyncio.run(serve(bootstrap))`.
 - `bootstrap(app: App, span: Span)` is an async generator with one `yield`: build shared objects, register routes, `yield`, clean up. Routes are fixed after `bootstrap`.
 - A handler is `async def handler(c: Context, w: Writer) -> None`. It answers once: `w.json`, `w.text`, `w.empty`, or `w.redirect`.
-- `Route("GET /apps/{name}")` is one method on one path. `app.add(ROUTE, handler)` registers it; `ROUTE.href(name)` builds the path. No `url_for`, no `app.get`.
+- `Route("GET /apps/{name}")` is one method on one path; a GET route answers HEAD too. `app.add(ROUTE, handler)` registers it; `ROUTE.href(name)` builds the path. No `url_for`, no `app.get`.
 - A literal segment beats a parameter, in any order: `/rooms/live` and `/rooms/{room_id}` both work.
 - `c.match.params`, `c.req.query`, `c.req.cookies`; `c.state` is filled by middleware. Middleware is `(inner: Handler) -> Handler`, added with `app.use("/prefix", mw)`.
 - A long loop iterates `c.alive(source)`. Background work is `c.app.create_task(coro)`, never bare `asyncio.create_task`. A timer loop reads `shutdown = app.shutdown` once, then ends each pass with `await asyncio.wait({shutdown}, timeout=interval)`, never `asyncio.sleep`, so it stops at once on shutdown.
@@ -21,6 +21,7 @@ Before you call work done, run `just check` (ruff, ruff format, pyrefly, pytest)
 
 ## Requests
 
+- `await c.req.body()` and `c.req.stream()` accept 10 MiB (`STARIO_REQUESTS_MAX_BODY_BYTES`). A route that takes more passes `max_size=`; past it, the read raises 413.
 - Validate every input. Malformed or forged input gets `w.text("why", status=400)` (or 404, 403, 409) and `return`.
 - In a handler: read input, validate (4xx and `return`), do the work, reply.
 - Slow work (a build, a download, a model call) runs in `c.app.create_task(self.run(job, c.span.step("job.run")))`. The handler records the job and replies. The task works inside `with span:`, updates the job status, and marks the job failed on `CancelledError` (Stario cancels it at shutdown). A client reads that status from another route.
