@@ -146,6 +146,8 @@ def test_an_app_has_one_source(tmp_path: Path):
     assert (app.image, app.compose_url) == ("", "https://example.com/x.yml")
     app = store.update_app("db", repo="https://github.com/org/db", runs="ops/stack.yml")
     assert (app.repo, app.ref, app.runs, app.compose_url) == ("https://github.com/org/db", "main", "ops/stack.yml", "")
+    with pytest.raises(YardError, match="cannot be empty"):
+        store.update_app("db", repo="")
     # A repo app that moves to an image drops its ref and runs.
     app = store.update_app("db", image="postgres:17")
     assert (app.repo, app.ref, app.runs, app.image) == ("", "", "", "postgres:17")

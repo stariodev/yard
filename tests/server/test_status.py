@@ -219,12 +219,23 @@ def test_running_plan_is_the_new_plan_only_on_exit_0(state, code, revision):
 
 def test_running_plan_reads_a_0_12_record():
     """A 0.12 record names the new revision `sha` and the image before it `previous`."""
-    labels = {"yard.sha": "f" * 40, "yard.image": "localhost/heldso:f", "yard.previous": "localhost/heldso:old"}
+    labels = {
+        "yard.sha": "f" * 40,
+        "yard.kind": "containerfile",
+        "yard.image": "localhost/heldso:f",
+        "yard.previous": "localhost/heldso:old",
+    }
     done = {"Names": ["deploy-heldso"], "State": "exited", "ExitCode": 0, "Labels": labels}
     plan = status.running_plan(HELDSO, _listed(done))
     assert plan is not None and plan.revision == "f" * 40
-    failed = {**done, "ExitCode": 1, "Labels": {**labels, "yard.before.revision": "e" * 40}}
-    assert status.running_plan(HELDSO, _listed(failed)) == Deployed(revision="e" * 40, image="localhost/heldso:old")
+    before = {"yard.before.revision": "e" * 40, "yard.before.kind": "containerfile"}
+    failed = {**done, "ExitCode": 1, "Labels": {**labels, **before}}
+    assert status.running_plan(HELDSO, _listed(failed)) == Deployed(
+        revision="e" * 40, kind="containerfile", image="localhost/heldso:old"
+    )
+    # A record from before 0.12 names no kind: no plan, so the next check deploys.
+    old = {**done, "Labels": {"yard.sha": "f" * 40, "yard.image": "localhost/heldso:f"}}
+    assert status.running_plan(HELDSO, _listed(old)) is None
 
 
 def test_a_failed_first_deploy_has_no_plan():

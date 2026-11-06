@@ -154,7 +154,7 @@ async def _deploy(yard: Yard, job: Job) -> Record:
         await compose.follow(config, name, job.push)
         await compose.wait(config, name)
         # The deploy it followed may run an older revision: check again.
-        want(yard, [name], job.cause, job.actor)
+        want(yard, [name])
         return await _read_record(yard, job)
     before = status.running_plan(app, listed) or Deployed()
     target = Deployed()
@@ -315,6 +315,11 @@ def app_file(config: Config, app: App, deployed: Deployed | None, which: str) ->
                 help_text=f"yard app cat compose --app {app.name}",
             )
         paths = [Path(project.env["CHECKOUT"]) / project.env["DOCKERFILE"]]
+    clone = config.clone(app.name).resolve()
+    for path in paths:
+        # A file of the clone stays in it: a committed symlink must not print a host file.
+        if path.is_relative_to(config.clone(app.name)) and not path.resolve().is_relative_to(clone):
+            raise YardError(404, "no_file", f"{path.name} of {app.name} points outside the clone")
     missing = [path for path in paths if not path.is_file()]
     if missing:
         raise YardError(
@@ -355,13 +360,16 @@ async def loop(yard: Yard) -> None:
     due = time.monotonic() + yard.config.check_seconds
     while await yard.pause(max(0.0, due - time.monotonic()), yard.wake):
         yard.wake.clear()
-        if time.monotonic() >= due:
-            for app in yard.store.list_apps():
-                yard.wanted.setdefault(app.name, ("check", "check"))
-            due = time.monotonic() + yard.config.check_seconds
-        for name in [name for name in yard.wanted if name not in yard.checking]:
-            cause, actor = yard.wanted.pop(name)
-            yard.checking[name] = yard.spawn(_check_one(yard, name, cause, actor))
+        try:
+            if time.monotonic() >= due:
+                due = time.monotonic() + yard.config.check_seconds
+                for app in yard.store.list_apps():
+                    yard.wanted.setdefault(app.name, ("check", "check"))
+            for name in [name for name in yard.wanted if name not in yard.checking]:
+                cause, actor = yard.wanted.pop(name)
+                yard.checking[name] = yard.spawn(_check_one(yard, name, cause, actor))
+        except Exception as exc:
+            log.warning("check: %s", exc)
 
 
 async def _check_one(yard: Yard, name: str, cause: str, actor: str) -> None:

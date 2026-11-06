@@ -65,6 +65,8 @@ class Forge:
         self._tokens: dict[str, tuple[str, float]] = {}
         # One mint at a time: the checks of many apps on one installation share one token.
         self._minting = asyncio.Lock()
+        # One refresh at a time: two at once would race on the state file.
+        self._refreshing = asyncio.Lock()
 
     def _state(self) -> dict:
         try:
@@ -188,10 +190,11 @@ class Forge:
 
     async def find_installations(self) -> list[dict]:
         """Every installation of the app, saved to state.json. Returns the saved entries."""
-        body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())
-        installations = [self._installation_row(item) for item in self._installation_items(body)]
-        self.save(installations=installations)
-        return installations
+        async with self._refreshing:
+            body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())
+            installations = [self._installation_row(item) for item in self._installation_items(body)]
+            self.save(installations=installations)
+            return installations
 
     async def token(self, repo: str = "") -> str:
         """An installation access token for the repo's owner, or the first installation.

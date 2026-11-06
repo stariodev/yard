@@ -136,8 +136,7 @@ async def start(
     text = "\n".join(log)[-_LOG_CHARS:]
     argv = ["run", "-d", "--name", deploy_container(app)]
     for key in sorted(labels):
-        if labels[key]:
-            argv += ["--label", f"yard.{key}={labels[key]}"]
+        argv += ["--label", f"yard.{key}={labels[key]}"]
     argv += ["--network", "yard", "-v", f"{config.podman_socket}:/run/podman/podman.sock"]
     argv += ["-v", f"{config.root}:{config.root}", "-e", f"YARD_LOG={text}"]
     if project is not None:

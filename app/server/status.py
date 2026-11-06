@@ -208,7 +208,8 @@ def running_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
         return None
     done = not item.running and item.exit_code == 0
     plan = labels_plan(item.labels, "" if done else "before.")
-    return plan if plan.revision else None
+    # A record from before 0.12 names no kind: it counts as no plan, and the next check deploys.
+    return plan if plan.revision and plan.kind else None
 
 
 def tried_plan(listed: dict[str, Container], name: str) -> Deployed | None:

@@ -102,18 +102,18 @@ class Yard:
         """
         if self.stario is not None and self.stario.shutting_down:
             return False
+        # Each read of `shutdown` is a new link to the app's future; a link left pending keeps a callback.
         waits: list[asyncio.Future] = [] if self.stario is None else [self.stario.shutdown]
-        waker = asyncio.ensure_future(wake.wait()) if wake is not None else None
-        if waker is not None:
-            waits.append(waker)
+        if wake is not None:
+            waits.append(asyncio.ensure_future(wake.wait()))
         try:
             if waits:
                 await asyncio.wait(waits, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
             else:
                 await asyncio.sleep(seconds)
         finally:
-            if waker is not None:
-                waker.cancel()
+            for waiting in waits:
+                waiting.cancel()
         return self.stario is None or not self.stario.shutting_down
 
     def spawn(self, coro) -> asyncio.Task:

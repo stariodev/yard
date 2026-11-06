@@ -811,6 +811,21 @@ async def test_app_files_route(yard, tmp_path, monkeypatch):
     assert "builds no image" in res.text
 
 
+async def test_app_files_stay_in_the_clone(yard, tmp_path, monkeypatch):
+    """A committed symlink must not print a host file."""
+    client, token, _root = yard
+    body = {"name": "heldso", "repo": "https://github.com/org/heldso", "runs": "compose.yml"}
+    await client.post("/api/v1/apps", json=body, headers=auth(token))
+    clone = tmp_path / "apps" / "heldso" / "repo"
+    clone.mkdir(parents=True)
+    (tmp_path / "apps" / "heldso" / "env").write_text("SECRET=1\n")
+    (clone / "compose.yml").symlink_to(tmp_path / "apps" / "heldso" / "env")
+    _deploy_record(monkeypatch, "heldso", revision="abc", runs="compose.yml", kind="compose")
+    res = await client.get("/api/v1/apps/heldso/files/compose", headers=auth(token))
+    assert res.status_code == 404
+    assert "SECRET" not in res.text and "outside the clone" in res.text
+
+
 async def test_app_files_the_yard_files(yard, monkeypatch):
     client, token, _root = yard
     await client.post(

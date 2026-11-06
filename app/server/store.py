@@ -219,6 +219,13 @@ class Store:
         app = self.app(name)
         if trigger is not None:
             app.trigger = check_trigger(trigger)
+        if "" in (repo, image, compose_url):
+            raise YardError(
+                400,
+                "bad_source",
+                "a source cannot be empty",
+                help_text="To change the source, pass the new one: --repo, --image, or --compose-url.",
+            )
         given = {key: value for key, value in (("repo", repo), ("image", image), ("compose_url", compose_url)) if value}
         if len(given) > 1:
             raise _two_sources()

@@ -955,6 +955,35 @@ async def test_the_worker_checks_an_app_once_at_a_time(tmp_path: Path, monkeypat
     worker.cancel()
 
 
+async def test_the_worker_survives_a_failed_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A round that cannot list the apps logs it; the next round still runs."""
+    yard = make_yard(tmp_path, check_seconds=0.01)
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
+    real = yard.store.list_apps
+    calls: list[str] = []
+
+    def flaky():
+        calls.append("list")
+        if len(calls) == 1:
+            raise OSError("apps/ is not readable")
+        return real()
+
+    seen: list[str] = []
+
+    async def fake_check(_yard, name, *, cause="check", actor="check"):
+        seen.append(name)
+
+    monkeypatch.setattr(yard.store, "list_apps", flaky)
+    monkeypatch.setattr(apps, "check", fake_check)
+    worker = asyncio.ensure_future(apps.loop(yard))
+    for _ in range(50):
+        await asyncio.sleep(0.005)
+        if seen:
+            break
+    worker.cancel()
+    assert len(calls) >= 2 and seen[:1] == ["heldso"]
+
+
 async def test_check_template_moved_deploys_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A new template stamp deploys a push app once; the tried pair is not retried."""
     yard = make_yard(tmp_path, skip_deploy=False)
@@ -1285,7 +1314,7 @@ async def test_a_running_deploy_container_is_the_lock(tmp_path: Path, monkeypatc
     await apps.check(yard, "yard", cause="push", actor="webhook:github")
     assert host.events == [("follow", "yard")]
     # The followed deploy ran an older revision: the follower asks the worker for another check.
-    assert yard.wanted == {"yard": ("push", "webhook:github")}
+    assert yard.wanted == {"yard": ("check", "check")}
     await apps.check(yard, "yard", cause="push", actor="webhook:github")
     assert host.events == [("follow", "yard"), ("run", "yard")]
     assert [call["labels"]["revision"] for call in recorder.calls] == [new]
