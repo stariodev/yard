@@ -9,65 +9,30 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-JsonScalar = str | int | float | bool | None
-
 
 class YardError(Exception):
-    """status and code identify the failure. message is the short reason."""
+    """status is the HTTP status, code names the failure for a program, message is the short reason,
+    and help_text says what to do next."""
 
-    def __init__(
-        self,
-        status: int,
-        code: str,
-        message: str,
-        exit_code: int | None = None,
-        *,
-        context: dict[str, JsonScalar] | None = None,
-        help_text: str | None = None,
-        example: str | None = None,
-    ) -> None:
+    def __init__(self, status: int, code: str, message: str, *, help_text: str = "") -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
-        self.exit_code = exit_code
-        self.context = dict(context) if context else {}
         self.help_text = help_text
-        self.example = example
-
-    def shown_context(self) -> dict[str, JsonScalar]:
-        found = dict(self.context)
-        if self.exit_code is not None:
-            found.setdefault("exit_code", self.exit_code)
-        return found
 
     def payload(self) -> dict[str, Any]:
-        body: dict[str, Any] = {"code": self.code, "message": self.message}
-        shown = self.shown_context()
-        if shown:
-            body["context"] = shown
+        body = {"code": self.code, "message": self.message}
         if self.help_text:
             body["help"] = self.help_text
-        if self.example:
-            body["example"] = self.example
         return body
 
     def __str__(self) -> str:
-        parts = [self.message]
-        shown = self.shown_context()
-        if shown:
-            ctx = ", ".join(f"{key}={value!r}" for key, value in shown.items())
-            parts.append(f"  Context: {ctx}")
-        if self.help_text:
-            parts.append(f"  Help: {self.help_text}")
-        if self.example:
-            parts.append(f"  Example:\n{self.example}")
-        return "\n".join(parts)
+        return f"{self.message}\n  Help: {self.help_text}" if self.help_text else self.message
 
 
 def explain(text: str) -> str:
     """Turn an API error body into the same text as str(YardError)."""
-
     try:
         body = json.loads(text)
     except json.JSONDecodeError:
@@ -75,33 +40,8 @@ def explain(text: str) -> str:
     error = body.get("error") if isinstance(body, dict) else None
     if not isinstance(error, dict) or not isinstance(error.get("message"), str):
         return text
-    raw_context = error.get("context")
-    context: dict[str, JsonScalar] | None = None
-    exit_code = None
-    if isinstance(raw_context, dict):
-        context = {}
-        for key, value in raw_context.items():
-            if not isinstance(key, str):
-                continue
-            if value is not None and not isinstance(value, str | int | float | bool):
-                continue
-            if key == "exit_code" and isinstance(value, int):
-                exit_code = value
-                continue
-            context[key] = value
     help_text = error.get("help")
-    example = error.get("example")
-    return str(
-        YardError(
-            0,
-            str(error.get("code") or ""),
-            error["message"],
-            exit_code,
-            context=context,
-            help_text=help_text if isinstance(help_text, str) else None,
-            example=example if isinstance(example, str) else None,
-        )
-    )
+    return str(YardError(0, str(error.get("code") or ""), error["message"], help_text=str(help_text or "")))
 
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -118,19 +58,15 @@ def check_name(name: str) -> None:
         raise YardError(
             400,
             "bad_name",
-            "name must be a short lowercase word",
-            context={"name": name},
+            f"{name!r}: a name is a short lowercase word",
             help_text="yard-* is reserved for this host.",
-            example="heldso",
         )
     if not _NAME.fullmatch(name):
         raise YardError(
             400,
             "bad_name",
-            "name must be a short lowercase word",
-            context={"name": name},
+            f"{name!r}: a name is a short lowercase word",
             help_text="Start with a letter. Then use letters, digits, and hyphens, up to 63 characters.",
-            example="heldso",
         )
 
 
@@ -140,10 +76,8 @@ def check_app_name(name: str) -> None:
         raise YardError(
             400,
             "bad_name",
-            "name must be a short lowercase word",
-            context={"name": name},
+            f"{name!r}: a name is a short lowercase word",
             help_text="caddy is reserved for the proxy.",
-            example="heldso",
         )
 
 
@@ -152,10 +86,8 @@ def check_ref(ref: str) -> None:
         raise YardError(
             400,
             "bad_ref",
-            "ref must be a branch name",
-            context={"ref": ref},
+            f"{ref!r}: ref must be a branch name",
             help_text="Use a branch name. Do not start with a slash, and do not use spaces or ..",
-            example="main",
         )
 
 
@@ -190,10 +122,8 @@ def check_repo(repo: str) -> str:
         raise YardError(
             400,
             "bad_repo",
-            "repo must be the full https URL",
-            context={"repo": repo},
+            f"{repo!r}: repo must be the full https URL",
             help_text="Use https://<forge>/<owner>/<name>.",
-            example="https://github.com/org/heldso",
         )
     # The host is canonical; the owner and name keep their spelling.
     return f"https://{host}/{pieces[1]}/{pieces[2]}"
@@ -214,10 +144,8 @@ def check_trigger(text: str) -> str:
     raise YardError(
         400,
         "bad_trigger",
-        "trigger must be push or manual",
-        context={"trigger": text},
+        f"{text!r}: trigger must be push or manual",
         help_text="push deploys when the repo moves. manual deploys only on yard app deploy.",
-        example="push",
     )
 
 
@@ -250,10 +178,8 @@ def check_domain(domain: str) -> None:
         raise YardError(
             400,
             "bad_domain",
-            "domain must be a hostname",
-            context={"domain": domain},
+            f"{domain!r}: domain must be a hostname",
             help_text="Use a lowercase hostname.",
-            example="heldso.example.com",
         )
 
 
@@ -272,10 +198,8 @@ def check_build_path(text: str) -> str:
         raise YardError(
             400,
             "bad_path",
-            "path must be a file inside the repo",
-            context={"path": text},
+            f"{text!r}: path must be a file inside the repo",
             help_text="A relative path like Containerfile or ops/compose.yml. No leading slash, no .., no spaces.",
-            example="ops/Containerfile",
         )
     return value
 
@@ -340,9 +264,7 @@ def check_env(env: Mapping[str, str | None]) -> None:
                 400,
                 "bad_key",
                 f"bad env key {key}",
-                context={"key": key},
                 help_text="A key uses letters, digits, and _",
-                example="API_TOKEN",
             )
 
 
@@ -423,7 +345,6 @@ def _env_error(message: str) -> YardError:
         "bad_key",
         message,
         help_text="A line is NAME=value. A # line is a comment.",
-        example="DOMAIN=heldso.example.com",
     )
 
 
@@ -528,10 +449,8 @@ def check_image(text: str) -> str:
     bad = YardError(
         400,
         "bad_image",
-        "an image is [registry/]name[:tag][@sha256:<64 hex>]",
-        context={"image": text},
+        f"{text!r}: an image is [registry/]name[:tag][@sha256:<64 hex>]",
         help_text="Name a tag: postgres:17 follows every 17.x release.",
-        example="postgres:17",
     )
     name, sep, digest = ref.partition("@")
     if sep and not _IMAGE_DIGEST.fullmatch(digest.removeprefix("sha256:")):

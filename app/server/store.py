@@ -180,8 +180,7 @@ class Store:
             raise YardError(
                 404,
                 "not_found",
-                "app does not exist",
-                context={"name": name},
+                f"app {name} does not exist",
                 help_text="Run yard app ls to see the apps on this host.",
             )
         return _read_app(name, file.read_text())
@@ -289,7 +288,6 @@ class Store:
                 403,
                 "forbidden",
                 "you cannot delete your own token",
-                context={"name": name},
                 help_text="Ask another token to remove it.",
             )
         path = self.root / "tokens" / name
@@ -297,8 +295,7 @@ class Store:
             raise YardError(
                 404,
                 "not_found",
-                "unknown token",
-                context={"name": name},
+                f"unknown token {name}",
                 help_text="Run yard token ls.",
             )
         path.unlink()

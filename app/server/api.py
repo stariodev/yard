@@ -77,7 +77,6 @@ def app_fields(body: dict, allowed: set[str]) -> dict[str, str]:
                 400,
                 "unknown_field",
                 f"unknown field {key}",
-                context={"field": key},
                 help_text="This Yard takes name, repo, ref, runs, image, compose_url, trigger. Upgrade the CLI: uv tool upgrade staryard",
             )
         if key == "name":
@@ -333,9 +332,8 @@ def _log_time(value: str) -> str:
     raise YardError(
         400,
         "bad_time",
-        "bad time",
+        f"bad time {value!r}",
         help_text='since/until: -15m, -1h, -2d, or "2025-01-31 14:00".',
-        context={"value": value},
     )
 
 
@@ -426,7 +424,6 @@ def bearer(store: Store) -> Middleware:
                             "unauthorized",
                             "unauthorized",
                             help_text="Pass a live token, or run yard login.",
-                            example="Authorization: Bearer <token>",
                         ).payload()
                     },
                     401,
@@ -524,7 +521,6 @@ class HostPage:
                 "bad_json",
                 "bad json",
                 help_text="days is a number 1 or more. dry is true or false.",
-                example='{"days": 7, "dry": false}',
             )
         w.json(cast(JsonValue, asdict(await apps.prune(self.yard, days, dry, actor=_actor(c)))))
 
@@ -579,7 +575,6 @@ class HostPage:
                 "bad_json",
                 "bad json",
                 help_text="name, owner, and forge are strings.",
-                example='{"name": "heldso"}',
             )
         w.json(cast(JsonValue, await repos.create_repo(self.yard, name, owner, forge, actor=_actor(c))))
 
@@ -592,7 +587,6 @@ class HostPage:
                 "bad_json",
                 "bad json",
                 help_text="repo is a string.",
-                example='{"repo": "https://github.com/org/heldso"}',
             )
         w.json(cast(JsonValue, await repos.repo_token(self.yard, repo, actor=_actor(c))))
 
@@ -782,7 +776,7 @@ class AppsPage:
                 w.json(cast(JsonValue, {"deploy": body}))
                 return
             if job is None:
-                raise YardError(404, "not_found", f"{name} has no deploy yet", context={"app": name})
+                raise YardError(404, "not_found", f"{name} has no deploy yet")
         if c.req.query.get("follow") != "1":
             body = _job_json(job)
             body["lines"] = job.lines
@@ -833,7 +827,6 @@ class AppsPage:
                     "bad_json",
                     "bad json",
                     help_text="env is an object of strings or null.",
-                    example='{"KEY": null}',
                 )
             patch[key] = value
         keys = self.yard.store.patch_env(name, patch)
@@ -858,7 +851,6 @@ class AppsPage:
                     "bad_json",
                     "bad json",
                     help_text="env is an object of strings.",
-                    example='{"KEY": "value"}',
                 )
             env[key] = value
         removed = sorted(set(self.yard.store.read_env(name)) - set(env))

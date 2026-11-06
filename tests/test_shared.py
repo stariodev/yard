@@ -33,16 +33,15 @@ def test_error_text_matches_stario() -> None:
         400,
         "bad_name",
         "name must be a short lowercase word",
-        context={"name": "Yard"},
         help_text="Start with a letter.",
-        example="heldso",
     )
-    assert str(exc) == (
-        "name must be a short lowercase word\n  Context: name='Yard'\n  Help: Start with a letter.\n  Example:\nheldso"
-    )
+    assert str(exc) == "name must be a short lowercase word\n  Help: Start with a letter."
     body = {"error": exc.payload()}
-    assert body["error"]["code"] == "bad_name"
-    assert body["error"]["help"] == "Start with a letter."
+    assert body["error"] == {
+        "code": "bad_name",
+        "message": "name must be a short lowercase word",
+        "help": "Start with a letter.",
+    }
     assert explain(json.dumps(body)) == str(exc)
 
 

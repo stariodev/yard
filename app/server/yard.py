@@ -135,7 +135,6 @@ class Yard:
                 "bad_repo",
                 f"repo must be a forge URL: {repo}",
                 help_text="Use https://<forge>/<owner>/<name>.",
-                example="https://github.com/org/heldso",
             )
         return forge
 
