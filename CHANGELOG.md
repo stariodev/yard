@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Breaking
+
+- Upgrade a 0.12 host through 0.13.2 first. Yard no longer reads the 0.12 forms:
+  - An app record with an image or a URL in `runs`. 0.13.1 writes such a record in the new form when Yard starts.
+  - The deploy labels `sha` and `previous`. A deploy container with only these labels counts as no plan, so the next check deploys the app once. A 0.12 deploy in `yard events` shows no revision.
+
+### Fixes
+
 - `yard events` shows the revision of a 0.13 deploy again, and a reverted deploy names the image it brought back. The deploy rows read only the 0.12 labels `sha` and `previous`, so on 0.13.0 and 0.13.1 they had no revision.
 
 ## 0.13.1

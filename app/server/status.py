@@ -208,7 +208,7 @@ def running_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
         return None
     done = not item.running and item.exit_code == 0
     plan = labels_plan(item.labels, "" if done else "before.")
-    # A record from before 0.12 names no kind: it counts as no plan, and the next check deploys.
+    # A record with no revision or no kind (a 0.12 or older deploy) counts as no plan, and the next check deploys.
     return plan if plan.revision and plan.kind else None
 
 
@@ -220,13 +220,7 @@ def tried_plan(listed: dict[str, Container], name: str) -> Deployed | None:
 
 def labels_plan(labels: dict[str, str], prefix: str = "") -> Deployed:
     """A plan from the deploy container's labels: the new plan, or with prefix "before." the plan before it."""
-    plan = Deployed(**{key: labels.get(prefix + key, "") for key in Deployed.__dataclass_fields__})
-    # A 0.12 record names the new revision `sha` and the image before it `previous`. Remove in 0.14.
-    if prefix:
-        plan.image = plan.image or labels.get("previous", "")
-    else:
-        plan.revision = plan.revision or labels.get("sha", "")
-    return plan
+    return Deployed(**{key: labels.get(prefix + key, "") for key in Deployed.__dataclass_fields__})
 
 
 def deploy_record(listed: dict[str, Container], name: str) -> Record | None:
