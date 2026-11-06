@@ -50,7 +50,7 @@ def test_a_hand_edit_reloads(tmp_path):
 
 def test_bootstrap_repo_may_be_empty(tmp_path):
     store = Store.open(tmp_path)
-    app = store.create_app("yard", "")
+    app = store.create_app("yard")
     assert app.repo == ""
     with pytest.raises(YardError) as caught:
         store.update_app("yard", repo="noslash")
@@ -80,7 +80,7 @@ def test_a_deleted_admin_stays_deleted(tmp_path):
 
 def test_a_repo_less_app_reads_back_no_ref(tmp_path):
     store = Store.open(tmp_path)
-    store.create_app("web", "", runs="docker.io/library/nginx:1.27")
+    store.create_app("web", image="docker.io/library/nginx:1.27")
     assert store.app("web").ref == ""
     assert store.app("web").trigger == "push"
 
@@ -88,8 +88,8 @@ def test_a_repo_less_app_reads_back_no_ref(tmp_path):
 def test_trigger_is_push_or_manual(tmp_path):
     store = Store.open(tmp_path)
     with pytest.raises(YardError, match="trigger must be"):
-        store.create_app("nightly", "https://origin.cursor.com/org/app", "main", "1h")
-    app = store.create_app("nightly", "https://origin.cursor.com/org/app", "main", "manual")
+        store.create_app("nightly", "https://origin.cursor.com/org/app", ref="main", trigger="1h")
+    app = store.create_app("nightly", "https://origin.cursor.com/org/app", ref="main", trigger="manual")
     assert app.trigger == "manual"
     app = store.update_app("nightly", trigger="")
     assert app.trigger == "push"
@@ -121,38 +121,52 @@ def test_runs_round_trip(tmp_path: Path):
 def test_runs_kinds(tmp_path: Path):
     store = Store.open(tmp_path)
     store.create_app("heldso", "https://github.com/org/heldso")
-    for bad in ("/abs", "a/../b", "a b", "a\\b", "a:b"):
+    for bad in ("/abs", "a/../b", "a b", "a\\b"):
         with pytest.raises(YardError):
             store.update_app("heldso", runs=bad)
     with pytest.raises(YardError, match="unknown template"):
         store.update_app("heldso", runs="yard:rust")
     app = store.update_app("heldso", runs="yard:http-nu")
     assert app.runs == "yard:http-nu"
-    with pytest.raises(YardError, match="runs a file from it|an app with a repo"):
+    with pytest.raises(YardError, match="use --image postgres:17"):
         store.update_app("heldso", runs="postgres:17")
 
 
-def test_runs_pair_rule(tmp_path: Path):
+def test_an_app_has_one_source(tmp_path: Path):
     store = Store.open(tmp_path)
-    store.create_app("db", "", runs="postgres:17")
+    with pytest.raises(YardError, match="one source"):
+        store.create_app("db", "https://github.com/org/db", image="postgres:17")
+    store.create_app("db", image="postgres:17")
     with pytest.raises(YardError, match="no repo"):
         store.update_app("db", runs="ops/stack.yml")
-    # A repo set on an image app without runs is a 400: the pair rule applies
-    # after every update, so repo and image can never both be set.
-    with pytest.raises(YardError, match="runs a file from it"):
-        store.update_app("db", repo="https://github.com/org/db")
-    assert store.app("db").repo == ""
-    app = store.update_app("db", runs="https://example.com/x.yml")
-    assert app.runs == "https://example.com/x.yml"
+    with pytest.raises(YardError, match="one source"):
+        store.update_app("db", image="postgres:18", compose_url="https://example.com/x.yml")
+    # A new source replaces the old one.
+    app = store.update_app("db", compose_url="https://example.com/x.yml")
+    assert (app.image, app.compose_url) == ("", "https://example.com/x.yml")
+    app = store.update_app("db", repo="https://github.com/org/db", runs="ops/stack.yml")
+    assert (app.repo, app.ref, app.runs, app.compose_url) == ("https://github.com/org/db", "main", "ops/stack.yml", "")
+    # A repo app that moves to an image drops its ref and runs.
+    app = store.update_app("db", image="postgres:17")
+    assert (app.repo, app.ref, app.runs, app.image) == ("", "", "", "postgres:17")
+
+
+def test_a_0_12_record_moves_runs_into_the_source(tmp_path: Path):
+    store = Store.open(tmp_path)
+    for name, runs in (("db", "postgres:17"), ("umami", "https://example.com/umami.yml")):
+        (tmp_path / "apps" / name).mkdir(parents=True)
+        (tmp_path / "apps" / name / "app").write_text(f"repo \ntrigger push\ncreated t\nruns {runs}\n")
+    assert (store.app("db").image, store.app("db").runs) == ("postgres:17", "")
+    assert store.app("umami").compose_url == "https://example.com/umami.yml"
 
 
 def test_repo_less_app_has_no_ref(tmp_path: Path):
     store = Store.open(tmp_path)
-    app = store.create_app("db", "", runs="postgres:17")
+    app = store.create_app("db", image="postgres:17")
     assert app.ref == ""
     assert "ref" not in (tmp_path / "apps" / "db" / "app").read_text()
     with pytest.raises(YardError, match="has no repo"):
         store.update_app("db", ref="main")
     # Setting a repo fills ref with main.
-    app = store.update_app("db", runs="x.yml", repo="https://github.com/org/db")
+    app = store.update_app("db", repo="https://github.com/org/db")
     assert app.ref == "main"

@@ -12,6 +12,22 @@ BASES: dict[str, str] = json.loads((_HERE / "bases.json").read_text())
 DOWNLOADS: dict[str, dict] = json.loads((_HERE / "downloads.json").read_text())
 
 
+def _stamp() -> str:
+    """The first 8 hex of a sha256 over every file of the detect package.
+
+    A change to a detector, a template, or a pin moves the stamp, and each app on a
+    yard:<template> deploys once.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(_HERE.rglob("*")):
+        if path.is_file() and path.suffix in {".py", ".json", ".Containerfile"}:
+            digest.update(path.relative_to(_HERE).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()[:8]
+
+
+STAMP = _stamp()
+
+
 class Repo:
     """A checkout path with small cached helpers."""
 
@@ -44,7 +60,7 @@ class Plan:
     answer: str  # a repo-relative path, or "yard:<template>" for a written Containerfile
     reason: str  # human text: "found compose.yml", "stario: pyproject.toml declares stario"
     generated: str = ""  # the rendered Containerfile when answer is "yard:<name>"
-    template: str = ""  # first 8 hex of the rendered text's sha256
+    template: str = ""  # STAMP when answer is "yard:<name>"
 
 
 def pin(ref: str) -> str:
@@ -68,14 +84,8 @@ def render(answer: str, reason: str, name: str, template: str = "", **values: st
 
 
 def plan_template(answer: str, reason: str, name: str, template: str = "", **values: str) -> Plan:
-    """A containerfile plan: the rendered text and its 8-hex template stamp."""
-    generated = render(answer, reason, name, template, **values)
-    return Plan("containerfile", answer, reason, generated, template_hash(generated))
-
-
-def template_hash(text: str) -> str:
-    """The template stamp: first 8 hex of the written file's sha256."""
-    return hashlib.sha256(text.encode()).hexdigest()[:8]
+    """A containerfile plan: the rendered text and the template stamp."""
+    return Plan("containerfile", answer, reason, render(answer, reason, name, template, **values), STAMP)
 
 
 def _join(items: list[str]) -> str:

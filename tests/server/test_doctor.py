@@ -111,7 +111,7 @@ def test_doctor_all_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_doctor_marks_a_used_forge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
-    yard.store.create_app("heldso", "https://github.com/org/app", "main")
+    yard.store.create_app("heldso", "https://github.com/org/app", ref="main")
     usage = collections.namedtuple("usage", "total used free")(200, 100, 100)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage)
     found = _run(yard)
@@ -146,7 +146,7 @@ def test_doctor_disk_says_where_the_space_went(tmp_path: Path, monkeypatch: pyte
         ps=CADDY_PS,
         df='[{"Type":"Images","RawSize":2000,"RawReclaimable":500,"Size":"2kB"}]',
     )
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     data = yard.config.data("heldso")
     data.mkdir(parents=True)
     (data / "db.sqlite").write_bytes(b"x" * 100)
@@ -183,7 +183,7 @@ def test_doctor_skips_the_proxy_checks_without_a_host(tmp_path: Path):
 
 def test_doctor_flags_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
 
     yard.podman = dead_podman()
     usage = collections.namedtuple("usage", "total used free")(100, 95, 5)
@@ -219,7 +219,7 @@ def test_doctor_flags_a_dead_admin_socket(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_doctor_routes_and_certificates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "heldso", "heldso.example.com")
     monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda host, port: [(0, 0, 0, "", ("10.0.0.1", 443))])
 
@@ -283,8 +283,8 @@ def _answer_https(monkeypatch: pytest.MonkeyPatch, status_line: bytes) -> list[b
 
 def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
-    yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("yard", "https://origin.cursor.com/org/yard", ref="main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "yard", "yard.example.com")
     _site(yard, "heldso", "heldso.example.com")
     sent = _answer_https(monkeypatch, b"HTTP/1.1 200 OK")
@@ -297,7 +297,7 @@ def test_doctor_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_doctor_https_fails_a_502(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Caddy answers 502 for an app that is down. The row fails; a 404 at / still passes."""
     yard = _yard(tmp_path, ps=CADDY_PS)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "heldso", "heldso.example.com")
     _answer_https(monkeypatch, b"HTTP/2 502 Bad Gateway")
     row = _run(yard)["https heldso.example.com"]
@@ -309,7 +309,7 @@ def test_doctor_https_fails_a_502(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 def test_doctor_https_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = _yard(tmp_path, ps=CADDY_PS)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "heldso", "heldso.example.com")
     monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda host, port: [(0, 0, 0, "", ("10.0.0.1", 443))])
 
@@ -385,7 +385,7 @@ HEALTH_OK = (
 
 def _healthcheck_yard(tmp_path: Path, inspect: str) -> Yard:
     yard = _yard(tmp_path, ps=CADDY_PS, inspect=inspect)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     return yard
 
 
@@ -422,8 +422,8 @@ def test_doctor_reads_every_healthcheck_in_one_inspect(tmp_path: Path):
     """Yard has a healthcheck too. One inspect covers the running containers and the app containers."""
     yard_ok = HEALTH_OK.replace("/heldso-app-1", "/yard-app-1")
     yard = _yard(tmp_path, ps=CADDY_PS, inspect=yard_ok[:-1] + "," + HEALTH_OK[1:])
-    yard.store.create_app("yard", "https://origin.cursor.com/org/yard", "main")
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("yard", "https://origin.cursor.com/org/yard", ref="main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     found = _run(yard)
     assert found["healthcheck yard"]["ok"]
     assert found["healthcheck heldso"]["ok"]
@@ -433,7 +433,7 @@ def test_doctor_reads_every_healthcheck_in_one_inspect(tmp_path: Path):
 
 def test_doctor_skips_a_healthcheck_for_an_app_without_a_container(tmp_path: Path):
     yard = _yard(tmp_path, ps=CADDY_PS, inspect="[]")
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     found = _run(yard)
     assert "healthcheck heldso" not in found
 

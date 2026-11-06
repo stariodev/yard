@@ -1,7 +1,6 @@
 """Yard's dependencies and runtime state. The services do the work."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -10,7 +9,7 @@ from app.server.caddy import Caddy
 from app.server.forges import Forge, GitHub, Origin
 from app.server.podman import Podman
 from app.server.store import Config, Store
-from app.shared import YardError
+from app.shared import YardError, now
 
 if TYPE_CHECKING:
     from stario import App as StarioApp
@@ -21,7 +20,10 @@ JOB_LINES = 5000
 
 @dataclass(slots=True)
 class Job:
-    """One deploy, memory only. `lines` is the live log; `changed` wakes followers."""
+    """One deploy while Yard runs it: the live log for `yard app deploy`. `changed` wakes followers.
+
+    The deploy container keeps the same log and the record; the job ends with that record.
+    """
 
     id: str
     app: str
@@ -30,7 +32,7 @@ class Job:
     started: str
     status: str = "running"
     ended: str = ""
-    outcome: dict | None = None
+    record: dict | None = None
     lines: list[str] = field(default_factory=list)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     pushed: int = 0
@@ -42,13 +44,18 @@ class Job:
         self.changed.set()
         self.changed.clear()
 
+    def end(self, record: dict) -> None:
+        self.status = str(record.get("status") or "failed")
+        self.ended = now()
+        self.record = record
+        self.changed.set()
+
 
 @dataclass(slots=True)
 class Tip:
     """What a check last saw for one app."""
 
     revision: str = ""
-    template: str = ""
     error: str = ""
 
 
@@ -74,8 +81,10 @@ class Yard:
         self.sites_lock = asyncio.Lock()
         # The hosts Caddy read from each site file, keyed by the file's (mtime_ns, size).
         self.site_hosts: dict[str, tuple[tuple[int, int], list[str]]] = {}
-        self.checked: dict[str, float] = {}
-        self.queued: dict[str, Callable[[], Awaitable[object]]] = {}
+        # The apps the check worker should check, with the cause and actor of the request.
+        self.wanted: dict[str, tuple[str, str]] = {}
+        self.checking: dict[str, asyncio.Task] = {}
+        self.wake = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
         self.stario: StarioApp | None = None
         self.last_prune = ""
@@ -85,23 +94,27 @@ class Yard:
     def attach(self, app: StarioApp) -> None:
         self.stario = app
 
-    async def pause(self, seconds: float) -> bool:
-        """Sleep ``seconds``. False when the app shuts down first: the caller stops.
+    async def pause(self, seconds: float, wake: asyncio.Event | None = None) -> bool:
+        """Sleep `seconds`, or until `wake` is set. False when the app shuts down first: the caller stops.
 
-        A background loop that sleeps with plain ``asyncio.sleep`` holds the
-        shutdown for the whole grace period before Stario cancels it.
+        A background loop that sleeps with plain `asyncio.sleep` holds the shutdown for the whole
+        grace period before Stario cancels it.
         """
-        if self.stario is None:
-            await asyncio.sleep(seconds)
-            return True
-        if self.stario.shutting_down:
+        if self.stario is not None and self.stario.shutting_down:
             return False
+        waits: list[asyncio.Future] = [] if self.stario is None else [self.stario.shutdown]
+        waker = asyncio.ensure_future(wake.wait()) if wake is not None else None
+        if waker is not None:
+            waits.append(waker)
         try:
-            # `shutdown` is a shield: the timeout cancels it, not the app's future.
-            await asyncio.wait_for(self.stario.shutdown, seconds)
-        except TimeoutError:
-            return True
-        return False
+            if waits:
+                await asyncio.wait(waits, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.sleep(seconds)
+        finally:
+            if waker is not None:
+                waker.cancel()
+        return self.stario is None or not self.stario.shutting_down
 
     def spawn(self, coro) -> asyncio.Task:
         """Background work from a request. The app tracks it when it can."""

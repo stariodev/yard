@@ -3,9 +3,10 @@
 # A healthcheck the app's compose file defines is the gate for `up --wait`; without
 # one the deploy ends once the container runs. The env is the only input. Every
 # step prints `==` so `podman logs deploy-<name>` reads as the full story.
+# YARD_LOG holds the lines Yard wrote before this container started; they come first.
 set -eu
 
-: "${COMPOSE_PROJECT_NAME:?}" "${COMPOSE_FILE:?}"
+[ -z "${YARD_LOG:-}" ] || printf '%s\n' "$YARD_LOG"
 
 dc() {
   docker-compose "$@"
@@ -56,25 +57,16 @@ build() {
   echo "built $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 
+# PREVIOUS_COMPOSE_FILE and PREVIOUS_IMAGE replace the new values: the previous project goes back up.
 revert() {
-  if [ -n "${PREVIOUS_COMPOSE_FILE:-}" ]; then
-    echo "== revert $PREVIOUS_COMPOSE_FILE"
-    if COMPOSE_FILE="$PREVIOUS_COMPOSE_FILE" dc up -d --no-build; then
-      echo "== reverted $PREVIOUS_COMPOSE_FILE"
-      exit 3
-    fi
-    echo "== revert failed"
-    exit 1
+  target="${PREVIOUS_COMPOSE_FILE:-${PREVIOUS_IMAGE:-}}"
+  [ -n "$target" ] || exit 1
+  echo "== revert $target"
+  if COMPOSE_FILE="${PREVIOUS_COMPOSE_FILE:-$COMPOSE_FILE}" IMAGE="${PREVIOUS_IMAGE:-$IMAGE}" dc up -d --no-build; then
+    echo "== reverted $target"
+    exit 3
   fi
-  if [ -n "${PREVIOUS_IMAGE:-}" ]; then
-    echo "== revert $PREVIOUS_IMAGE"
-    if IMAGE="$PREVIOUS_IMAGE" dc up -d --no-build; then
-      echo "== reverted $PREVIOUS_IMAGE"
-      exit 3
-    fi
-    echo "== revert failed"
-    exit 1
-  fi
+  echo "== revert failed"
   exit 1
 }
 
@@ -94,12 +86,18 @@ up() {
 
 case "${1:-}" in
   up)
+    : "${COMPOSE_PROJECT_NAME:?}" "${COMPOSE_FILE:?}"
     check
     up
     ;;
-  purge) dc down -v ;;
+  purge)
+    : "${COMPOSE_PROJECT_NAME:?}" "${COMPOSE_FILE:?}"
+    dc down -v
+    ;;
+  # A deploy that failed before the apply: the log above is its record.
+  fail) exit 1 ;;
   *)
-    echo "usage: apply {up|purge}" >&2
+    echo "usage: apply {up|purge|fail}" >&2
     exit 2
     ;;
 esac

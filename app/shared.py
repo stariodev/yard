@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 from urllib.parse import urlsplit
 
 JsonScalar = str | int | float | bool | None
@@ -211,10 +211,6 @@ def check_trigger(text: str) -> str:
         return "push"
     if text == "manual":
         return "manual"
-    raise _bad_trigger(text)
-
-
-def _bad_trigger(text: str) -> NoReturn:
     raise YardError(
         400,
         "bad_trigger",
@@ -287,42 +283,42 @@ def check_build_path(text: str) -> str:
 # The Containerfiles Yard writes. `runs yard:<name>` names one of these.
 TEMPLATES = ("python-uv", "python-pip", "go", "node-npm", "http-nu")
 
-_TEMPLATE = re.compile(r"yard:[a-z0-9-]+$")
 
-
-def parse_runs(text: str) -> tuple[str, str]:
-    """Classify a `runs` value. Returns (kind, normalized).
-
-    Kinds: auto (unset), template (yard:<name>), url (https), image, path.
-    """
+def check_runs(text: str) -> str:
+    """What a repo app runs: "" (auto), yard:<template>, or a path in the repo."""
     value = text.strip()
     if value in {"", "auto"}:
-        return "auto", ""
+        return ""
     if value.startswith("yard:"):
-        if not _TEMPLATE.fullmatch(value):
-            raise _bad_runs(value, f"template names are lowercase: {', '.join(f'yard:{t}' for t in TEMPLATES)}")
-        return "template", value
-    if value.startswith("https://"):
-        if len(value) > 500:
-            raise _bad_runs(value, "the URL is over 500 characters")
-        return "url", value
-    if value.startswith("http://"):
-        raise _bad_runs(value, "files are fetched over https")
-    if "://" in value:
-        raise _bad_runs(value, "files are fetched over https")
+        if value.removeprefix("yard:") not in TEMPLATES:
+            raise YardError(
+                400,
+                "bad_runs",
+                f"unknown template {value}",
+                help_text=f"The templates are {', '.join(f'yard:{t}' for t in TEMPLATES)}.",
+            )
+        return value
     if ":" in value or "@" in value:
-        return "image", check_image(value)
-    return "path", check_build_path(value)
+        raise YardError(
+            400,
+            "bad_runs",
+            f"runs {value}: runs names a file in the repo",
+            help_text=f"To run an image, use --image {value}. To run a compose file from a URL, use --compose-url.",
+        )
+    return check_build_path(value)
 
 
-def _bad_runs(value: str, message: str) -> YardError:
-    return YardError(
-        400,
-        "bad_runs",
-        f"runs {value}: {message}",
-        context={"runs": value},
-        help_text="auto, a path in the repo, yard:<template>, an image name:tag, or an https URL.",
-    )
+def check_compose_url(text: str) -> str:
+    """A compose file fetched over https."""
+    value = text.strip()
+    if not value.startswith("https://") or len(value) > 500 or any(ch.isspace() for ch in value):
+        raise YardError(
+            400,
+            "bad_compose_url",
+            "compose_url must be an https URL of a compose file, at most 500 characters",
+            help_text="Yard fetches the file over https.",
+        )
+    return value
 
 
 def name_ok(name: str) -> bool:
@@ -433,11 +429,7 @@ def _env_error(message: str) -> YardError:
 
 def now() -> str:
     """The API stamp: 2026-10-05T12:00:00Z, with fractions only when needed."""
-    stamp = datetime.now(UTC)
-    if stamp.microsecond == 0:
-        return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
-    frac = f"{stamp.microsecond:06d}".rstrip("0")
-    return stamp.strftime("%Y-%m-%dT%H:%M:%S.") + frac + "Z"
+    return stamp(datetime.now(UTC))
 
 
 def parse(text: str) -> datetime | None:

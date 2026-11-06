@@ -55,6 +55,8 @@ class Forge:
         self.last_delivery = ""
         self.last_check = ""
         self._tokens: dict[str, tuple[str, float]] = {}
+        # One mint at a time: the checks of many apps on one installation share one token.
+        self._minting = asyncio.Lock()
 
     def _state(self) -> dict:
         try:
@@ -205,7 +207,10 @@ class Forge:
                 f"{self.name} has no installation",
                 help_text=f"Run yard forge setup {self.name}.",
             )
-        installation = str(installation.get("id") or "")
+        async with self._minting:
+            return await self._mint(str(installation.get("id") or ""))
+
+    async def _mint(self, installation: str) -> str:
         cached = self._tokens.get(installation)
         if cached and cached[1] - 60 > time.time():
             return cached[0]

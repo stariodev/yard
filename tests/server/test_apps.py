@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 from app.server import apps, compose, git, sources, status
-from app.server.forges import Forge, GitHub, Origin
+from app.server.detect import STAMP
+from app.server.forges import Forge, GitHub
 from app.server.podman import Podman
 from app.server.store import Deployed
 from app.server.yard import Yard
@@ -42,25 +43,38 @@ OK_LOG = "== build localhost/heldso:abc\nbuilt 2026-10-05T10:00:00Z\n== started 
 
 
 class _Apply:
-    """Stands in for compose.apply. Records the call and returns (code, log)."""
+    """Stands in for the deploy container: compose.start, compose.follow, and compose.wait on a fake host.
+
+    A started container prints `text` and exits with `code`; a `fail` container exits 1.
+    """
 
     def __init__(self, code: int = 0, text: str = OK_LOG) -> None:
         self.calls: list[dict] = []
         self.code = code
         self.text = text
-        # The fake host that keeps the deploy container, when the test reads the record back.
         self.host: _Podman | None = None
 
-    async def __call__(
-        self, config, app, command, project, *, labels=None, detach=False, on_line=None
-    ) -> tuple[int, str]:
-        self.calls.append({"command": command, "app": app, "project": project, "detach": detach, "labels": labels})
-        if self.host is not None and command == "up":
-            self.host.record(app, labels or {}, self.code, running=detach)
-        if on_line is not None:
-            for line in self.text.splitlines():
-                on_line(line)
-        return self.code, self.text
+    async def start(self, config, app, command, project, *, labels, log) -> int:
+        assert self.host is not None
+        self.calls.append({"command": command, "app": app, "project": project, "labels": labels, "log": list(log)})
+        self.host.record(app, labels, 0, running=True)
+        self.host.pending[app] = ("", 1) if command == "fail" else (self.text, self.code)
+        return len(log)
+
+    async def follow(self, config, app, on_line, *, skip: int = 0) -> None:
+        assert self.host is not None
+        # A container this fake started prints its text; any other is a running deploy that a deploy follows.
+        found = self.host.pending.pop(app, None)
+        if found is None:
+            self.host.events.append(("follow", app))
+        text, code = found or ("== the running deploy\n", 0)
+        for line in text.splitlines():
+            on_line(line)
+        self.host.finish(app, code)
+
+    async def wait(self, config, app) -> int:
+        assert self.host is not None
+        return next(item["ExitCode"] for item in self.host.containers if item["Names"] == [f"deploy-{app}"])
 
 
 def _connect(monkeypatch: pytest.MonkeyPatch, token: str = "oit_x") -> None:
@@ -88,24 +102,20 @@ def _deploy_yard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "h
 
 
 def _hosted(yard: Yard, monkeypatch: pytest.MonkeyPatch, apply: _Apply | None = None, **kw) -> tuple[_Podman, _Apply]:
-    """A fake host: the apply and the failure record leave `deploy-<name>`, and `ps` lists it."""
+    """A fake host: each deploy leaves `deploy-<name>`, and `ps` lists it."""
     host = _Podman(**kw)
     yard.podman = host
     recorder = apply or _Apply()
     recorder.host = host
-    monkeypatch.setattr(compose, "apply", recorder)
-
-    async def fake_record(config, name, labels, lines):
-        host.record(name, labels, 1)
-
-    async def fake_follow(config, name, on_line):
-        host.events.append(("follow", name))
-        on_line("== the running deploy")
-        host.finish(name, 0)
-
-    monkeypatch.setattr(compose, "record_failure", fake_record)
-    monkeypatch.setattr(compose, "follow", fake_follow)
+    monkeypatch.setattr(compose, "start", recorder.start)
+    monkeypatch.setattr(compose, "follow", recorder.follow)
+    monkeypatch.setattr(compose, "wait", recorder.wait)
     return host, recorder
+
+
+async def _round(yard: Yard) -> None:
+    """One timer round of the check worker: every app, side by side."""
+    await asyncio.gather(*(apps.check(yard, app.name) for app in yard.store.list_apps()))
 
 
 async def _plan(yard: Yard, name: str) -> Deployed | None:
@@ -121,7 +131,7 @@ async def test_deploy_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # The deploy container carries the record.
     sha = git.head(yard.config.clone("heldso"))
     assert recorder.calls[0]["labels"] == {
-        "sha": sha,
+        "revision": sha,
         "image": outcome.image,
         "runs": "Containerfile",
         "kind": "containerfile",
@@ -130,7 +140,7 @@ async def test_deploy_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "actor": "webhook:origin",
     }
     assert await _plan(yard, "heldso") == Deployed(
-        revision=sha, runs="Containerfile", kind="containerfile", reason="found Containerfile"
+        revision=sha, runs="Containerfile", kind="containerfile", reason="found Containerfile", image=outcome.image
     )
 
 
@@ -151,16 +161,17 @@ async def test_deploy_apply_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert await _plan(yard, "heldso") is None
 
 
-async def test_deploy_yard_is_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_deploy_yard_runs_like_any_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A deploy of Yard replaces this process; the detached container finishes on the host."""
     yard, recorder = _deploy_yard(tmp_path, monkeypatch, name="yard")
     outcome = await apps.deploy(yard, "yard")
-    assert outcome.status == "pending"
-    assert recorder.calls[0]["detach"] is True
+    assert outcome.status == "ok"
+    assert recorder.calls[0]["command"] == "up"
 
 
 async def test_deploy_needs_a_repo(tmp_path: Path):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("yard", "")
+    yard.store.create_app("yard")
     outcome = await apps.deploy(yard, "yard")
     assert outcome.status == "failed"
     assert "yard app set --repo" in "\n".join(yard.deploys["yard"].lines)
@@ -192,7 +203,7 @@ async def test_deploy_reverted_when_the_gate_fails(tmp_path: Path, monkeypatch: 
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app")
     _clone(yard, "heldso")
     _connect(monkeypatch)
-    monkeypatch.setattr(compose, "apply", _Apply(code=3, text="== revert localhost/heldso:old\n"))
+    _hosted(yard, monkeypatch, _Apply(code=3, text="== revert localhost/heldso:old\n"))
 
     async def fake_sync(clone, url, ref, token=""):
         return git.head(clone)
@@ -213,7 +224,7 @@ async def test_a_deploy_labels_the_plan_before_it(tmp_path: Path, monkeypatch: p
     labels = recorder.calls[1]["labels"]
     assert labels["before.revision"] == sha and labels["before.kind"] == "containerfile"
     assert await _plan(yard, "heldso") == Deployed(
-        revision=sha, runs="Containerfile", kind="containerfile", reason="found Containerfile"
+        revision=sha, runs="Containerfile", kind="containerfile", reason="found Containerfile", image=outcome.image
     )
 
 
@@ -238,8 +249,8 @@ async def test_auto_guard_pins_a_moved_answer(tmp_path: Path, monkeypatch: pytes
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "failed"
     assert "auto found compose.yml (compose); the last deploy ran yard:python-uv (containerfile)" in outcome.error
-    assert "yard app set --runs compose.yml" in outcome.error
-    assert not recorder.calls[1:]  # the guard fails before apply
+    assert "yard app set --runs compose.yml" in "\n".join(yard.deploys["heldso"].lines)
+    assert recorder.calls[1]["command"] == "fail"  # the guard fails before the apply
 
 
 async def test_first_deploy_writes_the_template_containerfile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -283,32 +294,26 @@ async def test_deploy_runs_path_missing_fails(tmp_path: Path, monkeypatch: pytes
     yard.store.create_app("heldso", "https://origin.cursor.com/org/app", runs="deploy/x.yml")
     _clone(yard, "heldso")
     _connect(monkeypatch)
-    monkeypatch.setattr(compose, "apply", _Apply())
+    _host, recorder = _hosted(yard, monkeypatch)
 
     async def fake_sync(clone, url, ref, token=""):
         return git.head(clone)
 
     monkeypatch.setattr(git, "sync", fake_sync)
-    recorded: list[tuple[str, dict, list[str]]] = []
-
-    async def fake_record(config, name, labels, lines):
-        recorded.append((name, labels, list(lines)))
-
-    monkeypatch.setattr(compose, "record_failure", fake_record)
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "failed"
     assert "deploy/x.yml is not a file" in outcome.error
-    # The apply never ran, so a failed deploy container records the deploy and its lines.
-    name, labels, lines = recorded[0]
-    assert name == "heldso"
-    assert labels["sha"] == git.head(yard.config.clone("heldso"))
-    assert "deploy/x.yml is not a file" in labels["error"]
-    assert lines[0].startswith("== sync") and lines[-1].startswith("!! ")
+    # The apply never ran, so a `fail` deploy container records the deploy and prints its lines.
+    call = recorder.calls[0]
+    assert call["command"] == "fail" and call["project"] is None
+    assert call["labels"]["revision"] == git.head(yard.config.clone("heldso"))
+    assert "deploy/x.yml is not a file" in call["labels"]["error"]
+    assert call["log"][0].startswith("== sync") and call["log"][-1].startswith("!! ")
 
 
 async def test_deploy_image_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("db", "", runs="postgres:17")
+    yard.store.create_app("db", image="postgres:17")
     _host, recorder = _hosted(yard, monkeypatch)
 
     async def fake_digest(ref):
@@ -324,12 +329,12 @@ async def test_deploy_image_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     deployed = await _plan(yard, "db")
     assert deployed is not None
     assert deployed.revision == "sha256:" + "d" * 64
-    assert deployed.runs == "postgres:17" and deployed.kind == "image"
+    assert deployed.image == f"postgres:17@sha256:{'d' * 64}" and deployed.kind == "image"
 
 
 async def test_deploy_image_registry_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("db", "", runs="postgres:17")
+    yard.store.create_app("db", image="postgres:17")
     _hosted(yard, monkeypatch)
 
     async def fake_digest(ref):
@@ -347,7 +352,7 @@ URL_BODY = b"services:\n  app:\n    image: x\n    networks:\n      - yard\n"
 
 async def test_deploy_url_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("umami", "", runs="https://example.com/umami.yml")
+    yard.store.create_app("umami", compose_url="https://example.com/umami.yml")
     _host, recorder = _hosted(yard, monkeypatch)
     stale = tmp_path / "apps" / "umami" / "compose" / "000000000000.yml"
     stale.parent.mkdir(parents=True)
@@ -379,8 +384,8 @@ async def test_deploy_url_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 async def test_deploy_url_refuses_a_containerfile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("umami", "", runs="https://example.com/umami.yml")
-    monkeypatch.setattr(compose, "apply", _Apply())
+    yard.store.create_app("umami", compose_url="https://example.com/umami.yml")
+    _hosted(yard, monkeypatch)
 
     async def fake_fetch(url):
         return b"FROM scratch\n"
@@ -393,8 +398,8 @@ async def test_deploy_url_refuses_a_containerfile(tmp_path: Path, monkeypatch: p
 
 async def test_deploy_url_refuses_a_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("umami", "", runs="https://example.com/umami.yml")
-    monkeypatch.setattr(compose, "apply", _Apply())
+    yard.store.create_app("umami", compose_url="https://example.com/umami.yml")
+    _hosted(yard, monkeypatch)
 
     async def fake_fetch(url):
         return b"services:\n  app:\n    build: .\n"
@@ -422,7 +427,7 @@ def _delete_yard(tmp_path: Path, *, ps: str = "[]") -> tuple[Yard, FakeCaddy]:
 
 async def test_delete_refuses_the_yard_app(tmp_path: Path):
     yard = make_yard(tmp_path)
-    yard.store.create_app("yard", "")
+    yard.store.create_app("yard")
     with pytest.raises(YardError) as caught:
         await apps.delete(yard, "yard")
     assert caught.value.status == 400
@@ -455,9 +460,9 @@ async def test_delete_keeps_going_when_caddy_refuses(tmp_path: Path):
 
 async def test_delete_purges_from_the_deploy_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("db", "", runs="postgres:17")
+    yard.store.create_app("db", image="postgres:17")
     host, recorder = _hosted(yard, monkeypatch)
-    host.record("db", {"sha": "sha256:" + "a" * 64, "runs": "postgres:17", "kind": "image"}, 0)
+    host.record("db", {"revision": "sha256:" + "a" * 64, "runs": "postgres:17", "kind": "image"}, 0)
     yard.caddy = FakeCaddy()
     await apps.delete(yard, "db")
     assert recorder.calls and recorder.calls[0]["command"] == "purge"
@@ -473,6 +478,8 @@ class _Podman(Podman):
         self.has_image = has_image
         # ("run", app) for each deploy container, ("follow", app) for each joined one, in order.
         self.events: list[tuple[str, str]] = []
+        # The (text, exit code) of each started container that no follower has read yet.
+        self.pending: dict[str, tuple[str, int]] = {}
 
     def finish(self, app: str, code: int) -> None:
         """The running deploy container of the app exits with this code."""
@@ -550,7 +557,7 @@ IMAGES = json.dumps(
 
 def _yard(tmp_path: Path) -> Yard:
     yard = make_yard(tmp_path, podman_bin="podman")
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     return yard
 
 
@@ -673,16 +680,17 @@ def _stario_clone(yard: Yard, name: str) -> Path:
     return clone
 
 
-async def test_a_yard_self_deploy_is_not_deployed_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """The detached apply is the record. While it runs the check sees the tip as tried; after exit 0 it runs."""
+async def test_a_running_deploy_counts_as_tried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """While deploy-yard runs, the check sees its revision as tried. After exit 0 that revision runs."""
     yard, recorder = _deploy_github(tmp_path, monkeypatch, name="yard")
     sha = git.head(yard.config.clone("yard"))
-    assert (await apps.deploy(yard, "yard")).status == "pending"
+    host = recorder.host
+    assert host is not None
+    host.record("yard", {"revision": sha, "runs": "Containerfile", "kind": "containerfile"}, 0, running=True)
     monkeypatch.setattr(git, "remote_tip", lambda *a, **kw: asyncio.sleep(0, sha))
-    await apps._check(yard, yard.store.app("yard"), cause="check", actor="check")
-    assert len(recorder.calls) == 1
-    assert recorder.host is not None
-    recorder.host.containers[-1].update(State="exited", ExitCode=0)
+    await apps.check(yard, "yard")
+    assert not recorder.calls
+    host.finish("yard", 0)
     plan = await _plan(yard, "yard")
     assert plan is not None and plan.revision == sha
 
@@ -690,8 +698,8 @@ async def test_a_yard_self_deploy_is_not_deployed_again(tmp_path: Path, monkeypa
 async def test_check_forge_mints_a_token_per_installation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Two accounts on one forge each get their owner's token to ls-remote."""
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://github.com/Bobowski/app", "main", "push")
-    yard.store.create_app("other", "https://github.com/stariodev/tool", "main", "push")
+    yard.store.create_app("heldso", "https://github.com/Bobowski/app", ref="main", trigger="push")
+    yard.store.create_app("other", "https://github.com/stariodev/tool", ref="main", trigger="push")
     github = yard.forge_named("github")
     github.save(
         app_id="42",
@@ -713,15 +721,16 @@ async def test_check_forge_mints_a_token_per_installation(tmp_path: Path, monkey
         return "same123"
 
     async def fake_deploy(host, name, **_):
-        return apps.Outcome("ok")
+        return None
 
     monkeypatch.setattr(GitHub, "token", fake_token)
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
     monkeypatch.setattr(Forge, "connected", lambda self: True)
-    await apps.check_all(yard)
-    assert minted == ["https://github.com/Bobowski/app", "https://github.com/stariodev/tool"]
-    assert seen == [
+    yard.podman = _Podman()
+    await _round(yard)
+    assert sorted(minted) == ["https://github.com/Bobowski/app", "https://github.com/stariodev/tool"]
+    assert sorted(seen) == [
         ("https://github.com/Bobowski/app.git", "tok:https://github.com/Bobowski/app"),
         ("https://github.com/stariodev/tool.git", "tok:https://github.com/stariodev/tool"),
     ]
@@ -729,8 +738,8 @@ async def test_check_forge_mints_a_token_per_installation(tmp_path: Path, monkey
 
 async def test_check_all_deploys_a_moved_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
-    yard.store.create_app("manual-app", "https://origin.cursor.com/org/other", "main", "manual")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
+    yard.store.create_app("manual-app", "https://origin.cursor.com/org/other", ref="main", trigger="manual")
     yard.podman = _Podman()
     _connect(monkeypatch)
 
@@ -742,22 +751,20 @@ async def test_check_all_deploys_a_moved_tip(tmp_path: Path, monkeypatch: pytest
 
     async def fake_deploy(host, name, **_):
         deployed.append(name)
-        return apps.Outcome("ok")
+        return None
 
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
-    await apps.check_all(yard)
+    await _round(yard)
     assert deployed == ["heldso"]
     assert yard.tips["heldso"].revision == "abc123"
 
 
-async def test_check_all_runs_one_ps_and_does_not_wait_on_a_slow_deploy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """Two moved apps: web deploys while build still builds. The round lists once."""
+async def test_a_round_does_not_wait_on_a_slow_deploy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two moved apps: web deploys while build still builds. Each check lists the containers once."""
     yard = make_yard(tmp_path)
-    yard.store.create_app("build", "https://origin.cursor.com/org/build", "main", "push")
-    yard.store.create_app("web", "https://origin.cursor.com/org/web", "main", "push")
+    yard.store.create_app("build", "https://origin.cursor.com/org/build", ref="main", trigger="push")
+    yard.store.create_app("web", "https://origin.cursor.com/org/web", ref="main", trigger="push")
     host = _Podman()
     calls: list[tuple[str, ...]] = []
     real_run = host.run
@@ -779,24 +786,24 @@ async def test_check_all_runs_one_ps_and_does_not_wait_on_a_slow_deploy(
         started.append(name)
         if name == "build":
             await gate.wait()
-        return apps.Outcome("ok")
+        return None
 
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
-    round_ = asyncio.ensure_future(apps.check_all(yard))
+    round_ = asyncio.ensure_future(_round(yard))
     for _ in range(20):
         await asyncio.sleep(0)
     assert sorted(started) == ["build", "web"]
     assert not round_.done()
     gate.set()
     await round_
-    assert [args[0] for args in calls].count("ps") == 1
+    assert [args[0] for args in calls].count("ps") == 2
 
 
 async def test_a_waiting_deploy_keeps_the_running_job(tmp_path: Path):
     """A second deploy waits on the lock. Until it holds it, the running job stays the one a follower reads."""
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     async with yard.lock("heldso"):
         first = apps._new_job(yard, "heldso", "manual", "")
         waiting = asyncio.ensure_future(apps.deploy(yard, "heldso"))
@@ -812,7 +819,9 @@ async def test_a_new_runs_deploys_once_at_the_next_check(tmp_path: Path, monkeyp
     The next check deploys it. When that deploy fails, the check does not try the same plan again.
     """
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push", "ops/compose.yml")
+    yard.store.create_app(
+        "heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push", runs="ops/compose.yml"
+    )
     _connect(monkeypatch)
     deployed: list[str] = []
 
@@ -821,27 +830,27 @@ async def test_a_new_runs_deploys_once_at_the_next_check(tmp_path: Path, monkeyp
 
     async def fake_deploy(host, name, **_):
         deployed.append(name)
-        return apps.Outcome("failed")
+        return None
 
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
     host = _Podman()
-    host.record("heldso", {"sha": "same123", "runs": "compose.yml", "kind": "compose"}, 0)
+    host.record("heldso", {"revision": "same123", "runs": "compose.yml", "kind": "compose"}, 0)
     yard.podman = host
-    await apps.check_all(yard)
+    await _round(yard)
     assert deployed == ["heldso"]
 
     # The deploy of the new plan failed: the old plan still runs, and the tried one is not tried again.
-    labels = {"sha": "same123", "runs": "ops/compose.yml", "kind": "compose"}
+    labels = {"revision": "same123", "runs": "ops/compose.yml", "kind": "compose"}
     host.record("heldso", {**labels, "before.revision": "same123", "before.runs": "compose.yml"}, 1)
-    await apps.check_all(yard)
+    await _round(yard)
     assert deployed == ["heldso"]
 
 
 async def test_an_auto_app_ignores_the_resolved_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Auto records the answer it resolved; the check compares the commit only, as before."""
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
     _connect(monkeypatch)
 
     async def fake_tip(clone, url, ref, token=""):
@@ -853,14 +862,14 @@ async def test_an_auto_app_ignores_the_resolved_runs(tmp_path: Path, monkeypatch
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
     host = _Podman()
-    host.record("heldso", {"sha": "same123", "runs": "compose.yml", "kind": "compose"}, 0)
+    host.record("heldso", {"revision": "same123", "runs": "compose.yml", "kind": "compose"}, 0)
     yard.podman = host
-    await apps.check_all(yard)
+    await _round(yard)
 
 
 async def test_check_all_skips_an_unchanged_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
     _connect(monkeypatch)
 
     async def fake_tip(clone, url, ref, token=""):
@@ -872,15 +881,15 @@ async def test_check_all_skips_an_unchanged_tip(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
     host = _Podman()
-    host.record("heldso", {"sha": "same123", "runs": "Containerfile", "kind": "containerfile"}, 0)
+    host.record("heldso", {"revision": "same123", "runs": "Containerfile", "kind": "containerfile"}, 0)
     yard.podman = host
-    await apps.check_all(yard)
+    await _round(yard)
     assert yard.tips["heldso"].revision == "same123"
 
 
-async def test_check_all_without_origin_does_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_a_check_without_origin_reads_no_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
     seen: list[str] = []
 
     async def fake_tip(clone, url, ref, token=""):
@@ -888,15 +897,16 @@ async def test_check_all_without_origin_does_nothing(tmp_path: Path, monkeypatch
         return "abc"
 
     monkeypatch.setattr(git, "remote_tip", fake_tip)
-    await apps.check_all(yard)
+    await _round(yard)
     assert seen == []
     assert yard.forges["origin.cursor.com"].last_check == ""
+    assert "origin is not connected" in yard.tips["heldso"].error
 
 
 async def test_check_repo_deploys_only_that_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
-    yard.store.create_app("other", "https://origin.cursor.com/org/other", "main", "push")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
+    yard.store.create_app("other", "https://origin.cursor.com/org/other", ref="main", trigger="push")
     yard.podman = _Podman()
     _connect(monkeypatch)
     deployed: list[str] = []
@@ -906,62 +916,55 @@ async def test_check_repo_deploys_only_that_repo(tmp_path: Path, monkeypatch: py
 
     async def fake_deploy(host, name, **_):
         deployed.append(name)
-        return apps.Outcome("ok")
+        return None
 
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(apps, "deploy", fake_deploy)
-    await apps.check_repo(yard, "https://origin.cursor.com/org/app")
+    apps.check_repo(yard, "https://origin.cursor.com/org/app", "webhook:origin")
+    assert yard.wanted == {"heldso": ("push", "webhook:origin")} and yard.wake.is_set()
+    await apps.check(yard, "heldso", cause="push", actor="webhook:origin")
     assert deployed == ["heldso"]
 
 
-async def test_check_repo_debounces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_the_worker_checks_an_app_once_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Three pushes while a check runs: that app checks once more after it, not three times."""
     yard = make_yard(tmp_path)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
-    _connect(monkeypatch)
-    # The window must outlast one check: each check also asks Podman for the deploy record.
-    monkeypatch.setattr(apps, "_DEBOUNCE", 0.1)
-    seen: list[str] = []
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
+    gate = asyncio.Event()
+    seen: list[tuple[str, str]] = []
 
-    async def fake_tip(clone, url, ref, token=""):
-        seen.append("tip")
-        return ""
+    async def fake_check(_yard, name, *, cause="check", actor="check"):
+        seen.append((name, cause))
+        await gate.wait()
 
-    monkeypatch.setattr(git, "remote_tip", fake_tip)
-    await apps.check_repo(yard, "https://origin.cursor.com/org/app")
-    await apps.check_repo(yard, "https://origin.cursor.com/org/app")
-    await apps.check_repo(yard, "https://origin.cursor.com/org/app")
-    assert seen == ["tip"]
-    await asyncio.sleep(0.2)
-    assert seen == ["tip", "tip"]
-
-
-async def test_check_installation_debounces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard = make_yard(tmp_path)
-    monkeypatch.setattr(apps, "_DEBOUNCE", 0.05)
-    calls: list[str] = []
-
-    async def fake_find(self):
-        calls.append("install")
-        return []
-
-    monkeypatch.setattr(Origin, "find_installations", fake_find)
+    monkeypatch.setattr(apps, "check", fake_check)
+    worker = asyncio.ensure_future(apps.loop(yard))
+    apps.want(yard, ["heldso"], "push", "webhook:origin")
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert seen == [("heldso", "push")]
     for _ in range(3):
-        await apps.check_installation(yard, yard.forge_named("origin"))
-    assert calls == ["install"]
-    await asyncio.sleep(0.1)
-    assert calls == ["install", "install"]
+        apps.want(yard, ["heldso"], "push", "webhook:origin")
+        await asyncio.sleep(0)
+    assert seen == [("heldso", "push")]
+    gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert seen == [("heldso", "push"), ("heldso", "push")]
+    assert not yard.wanted and not yard.checking
+    worker.cancel()
 
 
 async def test_check_template_moved_deploys_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A new template stamp deploys a push app once; the tried pair is not retried."""
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
     clone = _stario_clone(yard, "heldso")
     _connect(monkeypatch)
     tip_sha = git.head(clone)
     # The apply "fails" (code 1), so the old plan runs; the tried pair on the record stops a retry.
     host, recorder = _hosted(yard, monkeypatch, _Apply(code=1, text="boom"))
-    labels = {"sha": tip_sha, "runs": "yard:python-uv", "kind": "containerfile", "template": "oldtpl12"}
+    labels = {"revision": tip_sha, "runs": "yard:python-uv", "kind": "containerfile", "template": "oldtpl12"}
     host.record("heldso", labels, 0)
 
     async def fake_tip(_c, url, ref, token=""):
@@ -973,19 +976,19 @@ async def test_check_template_moved_deploys_once(tmp_path: Path, monkeypatch: py
         return tip_sha
 
     monkeypatch.setattr(git, "sync", fake_sync)
-    await apps.check_all(yard)  # template moved -> deploy -> fails
+    await _round(yard)  # template moved -> deploy -> fails
     assert len(recorder.calls) == 1
-    await apps.check_all(yard)  # same (tip, template): tried, no second deploy
+    await _round(yard)  # same (tip, template): tried, no second deploy
     assert len(recorder.calls) == 1
-    assert recorder.calls[0]["labels"]["template"] == yard.tips["heldso"].template
+    assert recorder.calls[0]["labels"]["template"] == STAMP
     plan = await _plan(yard, "heldso")
     assert plan is not None and plan.template == "oldtpl12"
 
 
 async def test_check_source_image_and_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("db", "", runs="postgres:17", trigger="push")
-    yard.store.create_app("site", "", runs="https://example.com/x.yml", trigger="manual")
+    yard.store.create_app("db", trigger="push", image="postgres:17")
+    yard.store.create_app("site", trigger="manual", compose_url="https://example.com/x.yml")
     calls = []
 
     async def fake_digest(ref):
@@ -1000,7 +1003,7 @@ async def test_check_source_image_and_url(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(sources, "fetch_file", fake_fetch)
     _hosted(yard, monkeypatch)
     yard.forges = {}
-    await apps.check_all(yard)
+    await _round(yard)
     assert yard.tips["db"].revision == "sha256:" + "e" * 64
     assert yard.tips["site"].revision.startswith("sha256:")
     # push app deployed; manual app only updated tips
@@ -1010,7 +1013,7 @@ async def test_check_source_image_and_url(tmp_path: Path, monkeypatch: pytest.Mo
 
 async def test_check_source_error_and_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("db", "", runs="postgres:17", trigger="push")
+    yard.store.create_app("db", trigger="push", image="postgres:17")
     _hosted(yard, monkeypatch)
 
     async def fail(ref):
@@ -1018,7 +1021,7 @@ async def test_check_source_error_and_clear(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(sources, "digest", fail)
     yard.forges = {}
-    await apps.check_all(yard)
+    await _round(yard)
     assert yard.tips["db"].error == "postgres:17: boom"
     assert await _plan(yard, "db") is None
 
@@ -1026,14 +1029,14 @@ async def test_check_source_error_and_clear(tmp_path: Path, monkeypatch: pytest.
         return "sha256:" + "a" * 64
 
     monkeypatch.setattr(sources, "digest", ok)
-    await apps.check_all(yard)
+    await _round(yard)
     assert yard.tips["db"].error == ""
 
 
-async def test_check_source_one_get_per_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_check_source_of_two_url_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("a", "", runs="https://example.com/x.yml", trigger="manual")
-    yard.store.create_app("b", "", runs="https://example.com/x.yml", trigger="manual")
+    yard.store.create_app("a", trigger="manual", compose_url="https://example.com/x.yml")
+    yard.store.create_app("b", trigger="manual", compose_url="https://example.com/x.yml")
     calls = []
 
     async def fake_fetch(url):
@@ -1042,13 +1045,14 @@ async def test_check_source_one_get_per_url(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(sources, "fetch_file", fake_fetch)
     yard.forges = {}
-    await apps.check_all(yard)
-    assert calls == ["https://example.com/x.yml"]
+    await _round(yard)
+    assert calls == ["https://example.com/x.yml"] * 2
+    assert yard.tips["a"].revision == yard.tips["b"].revision
 
 
 async def test_source_deploy_failed_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("db", "", runs="postgres:17", trigger="push")
+    yard.store.create_app("db", trigger="push", image="postgres:17")
     revision = "sha256:" + "a" * 64
 
     async def fake_digest(ref):
@@ -1057,12 +1061,13 @@ async def test_source_deploy_failed_is_not_retried(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(sources, "digest", fake_digest)
     host, _failing = _hosted(yard, monkeypatch, _Apply(code=1, text="boom"))
     yard.forges = {}
-    await apps.check_all(yard)
+    await _round(yard)
     assert await _plan(yard, "db") is None
     recorder = _Apply(code=0)
+    _hosted(yard, monkeypatch, recorder)
+    yard.podman = host
     recorder.host = host
-    monkeypatch.setattr(compose, "apply", recorder)
-    await apps.check_all(yard)
+    await _round(yard)
     assert not recorder.calls
     newer = "sha256:" + "b" * 64
 
@@ -1070,14 +1075,14 @@ async def test_source_deploy_failed_is_not_retried(tmp_path: Path, monkeypatch: 
         return newer
 
     monkeypatch.setattr(sources, "digest", fake_digest2)
-    await apps.check_all(yard)
+    await _round(yard)
     assert recorder.calls
 
 
 async def test_check_plan_failure_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A push app whose plan fails deploys once; the same tip is not retried."""
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push", runs="missing.yml")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", runs="missing.yml", ref="main", trigger="push")
     clone = _clone(yard, "heldso")
     tip_sha = git.head(clone)
     _connect(monkeypatch)
@@ -1091,21 +1096,22 @@ async def test_check_plan_failure_is_not_retried(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(git, "sync", fake_sync)
     _host, recorder = _hosted(yard, monkeypatch)
-    await apps.check_all(yard)  # plan fails: missing.yml is not a file
-    assert not recorder.calls
-    outcome = await apps.deploy(yard, "heldso")
-    assert "missing.yml is not a file" in outcome.error
+    await _round(yard)  # plan fails: missing.yml is not a file
+    assert [call["command"] for call in recorder.calls] == ["fail"]
+    await _round(yard)
+    assert len(recorder.calls) == 1
+    assert "missing.yml is not a file" in recorder.calls[0]["labels"]["error"]
 
 
 async def test_check_auto_guard_failure_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A guard failure (compose -> template) deploys once; the tried pair stops the retry."""
+    """A new commit whose answer moves (compose -> template) fails the guard once; the tried plan stops a retry."""
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main", "push")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main", trigger="push")
     clone = _stario_clone(yard, "heldso")
     tip_sha = git.head(clone)
     _connect(monkeypatch)
     host, recorder = _hosted(yard, monkeypatch)
-    host.record("heldso", {"sha": tip_sha, "runs": "compose.yml", "kind": "compose"}, 0)
+    host.record("heldso", {"revision": "a" * 40, "runs": "compose.yml", "kind": "compose"}, 0)
 
     async def fake_tip(_c, url, ref, token=""):
         return tip_sha
@@ -1115,10 +1121,10 @@ async def test_check_auto_guard_failure_is_not_retried(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(git, "remote_tip", fake_tip)
     monkeypatch.setattr(git, "sync", fake_sync)
-    await apps.check_all(yard)
-    assert not recorder.calls  # the guard failed before apply
-    await apps.check_all(yard)
-    assert not recorder.calls  # and it did not retry the tried pair
+    await _round(yard)
+    assert [call["command"] for call in recorder.calls] == ["fail"]  # the guard failed before the apply
+    await _round(yard)
+    assert len(recorder.calls) == 1  # and it did not retry the tried plan
     assert host.containers[-1]["ExitCode"] == 1
     assert host.containers[-1]["Labels"]["yard.before.runs"] == "compose.yml"
 
@@ -1126,7 +1132,7 @@ async def test_check_auto_guard_failure_is_not_retried(tmp_path: Path, monkeypat
 async def test_check_url_containerfile_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A URL body that is a Containerfile fails once; the same body is not retried."""
     yard = make_yard(tmp_path, skip_deploy=False)
-    yard.store.create_app("umami", "", runs="https://example.com/x.yml", trigger="push")
+    yard.store.create_app("umami", trigger="push", compose_url="https://example.com/x.yml")
     calls = []
 
     async def fake_fetch(url):
@@ -1136,12 +1142,12 @@ async def test_check_url_containerfile_is_not_retried(tmp_path: Path, monkeypatc
     monkeypatch.setattr(sources, "fetch_file", fake_fetch)
     host, _recorder = _hosted(yard, monkeypatch)
     yard.forges = {}
-    await apps.check_all(yard)  # classify fails: a Containerfile needs a repo
+    await _round(yard)  # classify fails: a Containerfile needs a repo
     assert yard.tips["umami"].error == ""
     assert await _plan(yard, "umami") is None
-    assert host.containers[-1]["Labels"]["yard.sha"].startswith("sha256:")
+    assert host.containers[-1]["Labels"]["yard.revision"].startswith("sha256:")
     assert len(calls) == 2  # the check and the deploy
-    await apps.check_all(yard)
+    await _round(yard)
     assert len(calls) == 3  # the check only: no new deploy attempt
 
 
@@ -1150,8 +1156,8 @@ async def test_a_deploy_writes_a_job(tmp_path: Path, monkeypatch: pytest.MonkeyP
     outcome = await apps.deploy(yard, "heldso")
     job = yard.deploys["heldso"]
     assert outcome.status == "ok"
-    assert job.status == "ok" and job.ended and job.outcome is not None
-    assert job.outcome["status"] == "ok"
+    assert job.status == "ok" and job.ended and job.record is not None
+    assert job.record["status"] == "ok"
     assert job.lines[0] == "== sync https://origin.cursor.com/org/app main"
     assert any(line.startswith("== runs ") for line in job.lines)
     assert job.lines[-1].startswith(("== ", "hint:", "  ", "Set ", "Or ", "Then "))
@@ -1162,12 +1168,14 @@ async def test_start_deploy_returns_the_running_job(tmp_path: Path, monkeypatch:
     yard, _recorder = _deploy_yard(tmp_path, monkeypatch)
     gate = asyncio.Event()
 
+    follow = compose.follow
+
     async def slow(*a, **kw):
         gate.set()
         await asyncio.sleep(0.05)
-        return (0, "== done\n")
+        await follow(*a, **kw)
 
-    monkeypatch.setattr(compose, "apply", slow)
+    monkeypatch.setattr(compose, "follow", slow)
     job = apps.start_deploy(yard, "heldso")
     assert job.status == "running"
     await gate.wait()
@@ -1207,29 +1215,17 @@ def test_job_lines_trim_keeps_the_offset(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 async def test_a_very_long_apply_line_still_deploys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yard, _recorder = _deploy_yard(tmp_path, monkeypatch)
     long_line = "x" * (100 * 1024)
-
-    async def apply(config, name, command, project, *, labels=None, detach=False, on_line=None):
-        if on_line:
-            on_line(long_line)
-        return 0, long_line + "\n"
-
-    monkeypatch.setattr(compose, "apply", apply)
+    yard, _recorder = _deploy_yard(tmp_path, monkeypatch, apply=_Apply(text=long_line + "\n"))
     outcome = await apps.deploy(yard, "heldso")
     assert outcome.status == "ok"
     assert long_line in yard.deploys["heldso"].lines
 
 
 class _Dies(_Apply):
-    """The apply container starts, then the Yard process dies: the call never returns."""
+    """The deploy container starts, then the Yard process dies: the follow never returns."""
 
-    async def __call__(
-        self, config, app, command, project, *, labels=None, detach=False, on_line=None
-    ) -> tuple[int, str]:
-        assert self.host is not None
-        self.calls.append({"command": command, "app": app, "labels": labels})
-        self.host.record(app, labels or {}, 0, running=True)
+    async def follow(self, config, app, on_line, *, skip: int = 0) -> None:
         raise asyncio.CancelledError
 
 
@@ -1249,9 +1245,7 @@ async def test_a_deploy_reports_its_rev_after_yard_dies_mid_deploy(tmp_path: Pat
     for args in (["add", "."], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "two"]):
         subprocess.run(["git", "-C", str(clone), *args], check=True, capture_output=True)
     new = git.head(clone)
-    dies = _Dies()
-    dies.host = host
-    monkeypatch.setattr(compose, "apply", dies)
+    monkeypatch.setattr(compose, "follow", _Dies().follow)
     with pytest.raises(asyncio.CancelledError):
         await apps.deploy(yard, "stario-site")
     plan = await _plan(yard, "stario-site")
@@ -1260,8 +1254,10 @@ async def test_a_deploy_reports_its_rev_after_yard_dies_mid_deploy(tmp_path: Pat
     host.containers[-1].update(State="exited", ExitCode=0)  # the apply ends on the host
     fresh = Yard(yard.config, yard.store)
     fresh.podman = host
-    assert await _plan(fresh, "stario-site") == Deployed(
-        revision=new, runs="Containerfile", kind="containerfile", reason="found Containerfile"
+    plan = await _plan(fresh, "stario-site")
+    assert plan is not None
+    assert plan == Deployed(
+        revision=new, runs="Containerfile", kind="containerfile", reason="found Containerfile", image=plan.image
     )
 
     async def no_deploy(*args, **kw):
@@ -1269,7 +1265,7 @@ async def test_a_deploy_reports_its_rev_after_yard_dies_mid_deploy(tmp_path: Pat
 
     monkeypatch.setattr(apps, "deploy", no_deploy)
     monkeypatch.setattr(git, "remote_tip", lambda *a, **kw: asyncio.sleep(0, new))
-    await apps._check(fresh, fresh.store.app("stario-site"), cause="check", actor="check")
+    await apps.check(fresh, "stario-site")
 
 
 async def test_a_running_deploy_container_is_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1283,17 +1279,21 @@ async def test_a_running_deploy_container_is_the_lock(tmp_path: Path, monkeypatc
     assert host is not None
     old = "a" * 40
     new = git.head(yard.config.clone("yard"))
-    host.record("yard", {"sha": old, "runs": "Containerfile", "kind": "containerfile"}, 0, running=True)
+    host.record("yard", {"revision": old, "runs": "Containerfile", "kind": "containerfile"}, 0, running=True)
     host.events.clear()
     monkeypatch.setattr(git, "remote_tip", lambda *a, **kw: asyncio.sleep(0, new))
-    await apps._check(yard, yard.store.app("yard"), cause="push", actor="webhook:github")
+    await apps.check(yard, "yard", cause="push", actor="webhook:github")
+    assert host.events == [("follow", "yard")]
+    # The followed deploy ran an older revision: the follower asks the worker for another check.
+    assert yard.wanted == {"yard": ("push", "webhook:github")}
+    await apps.check(yard, "yard", cause="push", actor="webhook:github")
     assert host.events == [("follow", "yard"), ("run", "yard")]
-    assert [call["labels"]["sha"] for call in recorder.calls] == [new]
+    assert [call["labels"]["revision"] for call in recorder.calls] == [new]
     assert recorder.calls[0]["labels"]["before.revision"] == old
 
     # The new deploy runs for the tip: a second push follows nothing and runs nothing.
     host.events.clear()
-    await apps._check(yard, yard.store.app("yard"), cause="push", actor="webhook:github")
+    await apps.check(yard, "yard", cause="push", actor="webhook:github")
     assert host.events == []
     assert len(recorder.calls) == 1
 
@@ -1303,14 +1303,14 @@ async def test_a_deploy_request_joins_the_running_deploy(tmp_path: Path, monkeyp
     yard, recorder = _deploy_yard(tmp_path, monkeypatch)
     host = recorder.host
     assert host is not None
-    host.record("heldso", {"sha": "b" * 40, "image": "localhost/heldso:bbbbbbbbbbbb"}, 0, running=True)
+    host.record("heldso", {"revision": "b" * 40, "image": "localhost/heldso:bbbbbbbbbbbb"}, 0, running=True)
 
     async def no_sync(*args, **kw):
         raise AssertionError("synced the clone under a running build")
 
     monkeypatch.setattr(git, "sync", no_sync)
     outcome = await apps.deploy(yard, "heldso")
-    assert outcome.status == "ok" and outcome.joined
+    assert outcome.status == "ok" and "heldso" in yard.wanted
     assert outcome.image == "localhost/heldso:bbbbbbbbbbbb"
     assert "== the running deploy" in yard.deploys["heldso"].lines
     assert not recorder.calls

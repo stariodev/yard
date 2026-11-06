@@ -492,11 +492,12 @@ async def test_github_hook(yard, monkeypatch):
 
     seen: list[str] = []
 
-    async def _noop():
-        return None
+    async def _install(_yard, _forge):
+        seen.append("install")
+        return ""
 
-    monkeypatch.setattr(apps, "check_repo", lambda _yard, repo: seen.append(repo) or _noop())
-    monkeypatch.setattr(apps, "check_installation", lambda _yard, _forge: seen.append("install") or _noop())
+    monkeypatch.setattr(apps, "check_repo", lambda _yard, repo, actor: seen.append(repo))
+    monkeypatch.setattr(apps, "refresh_installations", _install)
 
     def sig(body: str) -> str:
         digest = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
@@ -800,32 +801,33 @@ async def test_app_files_route(yard, tmp_path, monkeypatch):
     clone = tmp_path / "apps" / "heldso" / "repo"
     clone.mkdir(parents=True)
     (clone / "compose.yml").write_text("services: {}\n")
-    _deploy_record(monkeypatch, "heldso", sha="abc", runs="compose.yml", kind="compose")
+    _deploy_record(monkeypatch, "heldso", revision="abc", runs="compose.yml", kind="compose")
     res = await client.get("/api/v1/apps/heldso/files/compose", headers=auth(token))
     assert res.status_code == 200
     assert res.text == "services: {}\n"
 
     res = await client.get("/api/v1/apps/heldso/files/containerfile", headers=auth(token))
     assert res.status_code == 404
-    assert "compose file" in res.text
+    assert "builds no image" in res.text
 
 
 async def test_app_files_the_yard_files(yard, monkeypatch):
     client, token, _root = yard
     await client.post(
         "/api/v1/apps",
-        json={"name": "db", "runs": "postgres:17"},
+        json={"name": "db", "image": "postgres:17"},
         headers=auth(token),
     )
     res = await client.get("/api/v1/apps/db/files/containerfile", headers=auth(token))
     assert res.status_code == 404
-    _deploy_record(monkeypatch, "db", sha="sha256:" + "a" * 64, runs="postgres:17", kind="image")
+    _deploy_record(monkeypatch, "db", revision="sha256:" + "a" * 64, kind="image", image="postgres:17@sha256:a")
     res = await client.get("/api/v1/apps/db/files/containerfile", headers=auth(token))
     assert res.status_code == 404
-    assert "runs an image" in res.text
+    assert "builds no image" in res.text
     res = await client.get("/api/v1/apps/db/files/compose", headers=auth(token))
     assert res.status_code == 200
-    assert "# app.compose.yml" in res.text and "image: ${IMAGE}" in res.text
+    # One file prints as it is; several files print each under its name.
+    assert "image: ${IMAGE}" in res.text and "# app.compose.yml" not in res.text
 
 
 def _deploy_record(monkeypatch, name: str, **labels: str) -> None:
@@ -847,12 +849,21 @@ def _deploy_record(monkeypatch, name: str, **labels: str) -> None:
     monkeypatch.setattr(Podman, "run", fake_run)
 
 
-async def test_patch_repo_on_an_image_app_is_400(yard):
+async def test_an_app_has_one_source(yard):
     client, token, _root = yard
-    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
+    res = await client.post("/api/v1/apps", json={"name": "db"}, headers=auth(token))
+    assert res.status_code == 400 and "a source is required" in res.text
+    body = {"name": "db", "image": "postgres:17", "repo": "https://github.com/org/db"}
+    res = await client.post("/api/v1/apps", json=body, headers=auth(token))
+    assert res.status_code == 400 and "one source" in res.text
+    await client.post("/api/v1/apps", json={"name": "db", "image": "postgres:17"}, headers=auth(token))
+    res = await client.patch("/api/v1/apps/db", json={"runs": "ops/compose.yml"}, headers=auth(token))
+    assert res.status_code == 400 and "no repo" in res.text
+    # A new source replaces the old one.
     res = await client.patch("/api/v1/apps/db", json={"repo": "https://github.com/org/db"}, headers=auth(token))
-    assert res.status_code == 400
-    assert "runs a file from it" in res.text
+    assert res.status_code == 200
+    app = res.json()["app"]
+    assert (app["repo"], app["ref"], app["image"]) == ("https://github.com/org/db", "main", "")
 
 
 async def test_page_record_is_the_record():
@@ -862,7 +873,7 @@ async def test_page_record_is_the_record():
     from app.server.store import App
 
     page = Page(
-        app=App("heldso", "https://github.com/org/heldso", "main", "push", "t", "ops/Dockerfile"),
+        app=App("heldso", "push", "t", repo="https://github.com/org/heldso", ref="main", runs="ops/Dockerfile"),
         image="localhost/heldso:abc1234",
         sha="abc1234",
         env_file="/env",
@@ -881,7 +892,7 @@ async def test_page_record_is_the_record():
 
 async def test_deploy_is_a_job(yard):
     client, token, _root = yard
-    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
+    await client.post("/api/v1/apps", json={"name": "db", "image": "postgres:17"}, headers=auth(token))
     res = await client.post("/api/v1/apps/db/deploy", json={}, headers=auth(token))
     assert res.status_code == 202
     job = res.json()["deploy"]
@@ -907,7 +918,7 @@ async def test_deploy_get_and_follow(yard):
     client, token, _root = yard
     res = await client.get("/api/v1/apps/db/deploy", headers=auth(token))
     assert res.status_code == 404
-    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
+    await client.post("/api/v1/apps", json={"name": "db", "image": "postgres:17"}, headers=auth(token))
     await client.post("/api/v1/apps/db/deploy", json={}, headers=auth(token))
     await asyncio.sleep(0.2)
     res = await client.get("/api/v1/apps/db/deploy", headers=auth(token))
@@ -924,13 +935,13 @@ async def test_deploy_get_and_follow(yard):
 
 async def test_deploy_second_post_returns_the_running_job(yard, monkeypatch):
     client, token, _root = yard
-    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
+    await client.post("/api/v1/apps", json={"name": "db", "image": "postgres:17"}, headers=auth(token))
     gate = asyncio.Event()
 
-    async def slow(yard_, name, **kw):
+    async def slow(yard_, job):
         await gate.wait()
 
-    monkeypatch.setattr(apps, "_finish", slow)
+    monkeypatch.setattr(apps, "_run", slow)
     first = await client.post("/api/v1/apps/db/deploy", json={}, headers=auth(token))
     second = await client.post("/api/v1/apps/db/deploy", json={}, headers=auth(token))
     gate.set()
@@ -1082,13 +1093,17 @@ async def test_repo_token_checks_the_repo(yard):
 async def test_deploy_get_reads_the_deploy_container(yard, monkeypatch):
     """After a restart Yard has no job; the deploy container still answers."""
     client, token, _root = yard
-    await client.post("/api/v1/apps", json={"name": "db", "runs": "postgres:17"}, headers=auth(token))
+    await client.post("/api/v1/apps", json={"name": "db", "image": "postgres:17"}, headers=auth(token))
     listed = [
         {
             "Names": ["deploy-db"],
             "State": "exited",
             "ExitCode": 3,
-            "Labels": {"yard.sha": "sha256:" + "d" * 64, "yard.image": "postgres:17@x", "yard.previous": "postgres:16"},
+            "Labels": {
+                "yard.revision": "sha256:" + "d" * 64,
+                "yard.image": "postgres:17@x",
+                "yard.before.image": "postgres:16",
+            },
         }
     ]
 

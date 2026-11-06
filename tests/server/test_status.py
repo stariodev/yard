@@ -60,9 +60,9 @@ def test_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     ]
     stats = '[{"Name":"heldso-app-1","CPUPerc":"1.5%","MemUsage":"20MB / 1GB"}]'
     yard = _yard(tmp_path, ps, stats)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    yard.store.create_app("nightly", "https://origin.cursor.com/org/app", "main", "manual")
-    yard.store.create_app("gone", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
+    yard.store.create_app("nightly", "https://origin.cursor.com/org/app", ref="main", trigger="manual")
+    yard.store.create_app("gone", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "heldso", "heldso.example.com")
     data = tmp_path / "apps" / "heldso" / "data"
     data.mkdir(parents=True)
@@ -124,8 +124,8 @@ def test_report_running_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         {"Names": ["caddy"], "State": "exited"},
     ]
     yard = _yard(tmp_path, ps)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
-    yard.store.create_app("gone", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
+    yard.store.create_app("gone", "https://origin.cursor.com/org/app", ref="main")
     yard.tips.clear()
     report = asdict(asyncio.run(status.report(yard, running_only=True)))
     names = [row["container"] for row in report["rows"]]
@@ -135,7 +135,7 @@ def test_report_running_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_app_report_is_the_app_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     log = "2026-10-05T12:00:00Z one\n2026-10-05T12:00:01Z two\n"
     yard = _yard(tmp_path, [_app_container("heldso", "heldso-app-1")], sock=True, logs=log)
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "heldso", "heldso.example.com")
 
     from app.server.yard import Tip
@@ -160,7 +160,7 @@ def test_two_hosts_stay_on_the_app_row(tmp_path: Path, monkeypatch: pytest.Monke
             _app_container("heldso", "heldso-worker"),
         ],
     )
-    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", "main")
+    yard.store.create_app("heldso", "https://origin.cursor.com/org/app", ref="main")
     _site(yard, "heldso", "heldso.example.com", "www.heldso.example.com")
     yard.tips.clear()
     report = asdict(asyncio.run(status.report(yard)))
@@ -174,7 +174,7 @@ def test_url_row_shows_the_record_revision(tmp_path):
     from app.server.podman import Container
     from app.server.yard import Tip
 
-    app = Store.open(tmp_path).create_app("umami", "", runs="https://example.com/umami.yml")
+    app = Store.open(tmp_path).create_app("umami", compose_url="https://example.com/umami.yml")
     revision = "sha256:" + "b" * 64
     plan = status.running_plan(app, _listed(_deploy("umami", revision, runs=app.runs, kind="compose")))
     item = Container(name="umami-app-1", image="postgres:17", app="umami", running=True, state="running")
@@ -185,7 +185,7 @@ def test_url_row_shows_the_record_revision(tmp_path):
 
 def _deploy(name: str, sha: str, *, state: str = "exited", code: int = 0, **labels: str) -> dict:
     """A deploy container. A `before_runs` keyword is the `yard.before.runs` label."""
-    given = {"yard.sha": sha, **{f"yard.{key.replace('_', '.')}": value for key, value in labels.items()}}
+    given = {"yard.revision": sha, **{f"yard.{key.replace('_', '.')}": value for key, value in labels.items()}}
     return {"Names": [f"deploy-{name}"], "State": state, "ExitCode": code, "Labels": given}
 
 
@@ -200,7 +200,7 @@ def _listed(*rows: dict):
     return parse_ps(json.dumps(list(rows)))
 
 
-HELDSO = App("heldso", "https://github.com/org/heldso", "main", "push", "t", "")
+HELDSO = App("heldso", "push", "t", repo="https://github.com/org/heldso", ref="main")
 NEW = {"runs": "yard:python-uv", "kind": "containerfile", "template": "3f9a1c2e"}
 BEFORE = {"before_revision": "old", "before_runs": "Containerfile", "before_kind": "containerfile"}
 
@@ -217,22 +217,14 @@ def test_running_plan_is_the_new_plan_only_on_exit_0(state, code, revision):
         assert plan == Deployed(revision="old", runs="Containerfile", kind="containerfile")
 
 
-def test_running_plan_falls_back_to_the_app_image():
-    """A host from before the labels: the app container's image names the sha and the template."""
-    listed = _listed(_app_box("heldso", "localhost/heldso:0123456789ab-3f9a1c2e"))
-    assert status.running_plan(HELDSO, listed) == Deployed(revision="0123456789ab", template="3f9a1c2e")
-    db = App("db", "", "main", "push", "t", "postgres:17")
-    digest = "sha256:" + "d" * 64
-    listed = _listed(_app_box("db", f"docker.io/library/postgres:17@{digest}"))
-    assert status.running_plan(db, listed) == Deployed(revision=digest, runs="postgres:17", kind="image")
-    url = App("u", "", "main", "push", "t", "https://example.com/x.yml")
-    assert status.running_plan(url, _listed(_app_box("u", "postgres:17"))) is None
-    assert status.running_plan(HELDSO, _listed()) is None
-
-
-def test_running_plan_of_a_0_11_record_reads_the_template_from_its_image():
-    record = _deploy("heldso", "f" * 40, image="localhost/heldso:ffffffffffff-3f9a1c2e")
-    assert status.running_plan(HELDSO, _listed(record)) == Deployed(revision="f" * 40, template="3f9a1c2e")
+def test_running_plan_reads_a_0_12_record():
+    """A 0.12 record names the new revision `sha` and the image before it `previous`."""
+    labels = {"yard.sha": "f" * 40, "yard.image": "localhost/heldso:f", "yard.previous": "localhost/heldso:old"}
+    done = {"Names": ["deploy-heldso"], "State": "exited", "ExitCode": 0, "Labels": labels}
+    plan = status.running_plan(HELDSO, _listed(done))
+    assert plan is not None and plan.revision == "f" * 40
+    failed = {**done, "ExitCode": 1, "Labels": {**labels, "yard.before.revision": "e" * 40}}
+    assert status.running_plan(HELDSO, _listed(failed)) == Deployed(revision="e" * 40, image="localhost/heldso:old")
 
 
 def test_a_failed_first_deploy_has_no_plan():
