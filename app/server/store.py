@@ -158,12 +158,7 @@ class Store:
         (root / "apps").mkdir(parents=True, exist_ok=True)
         tokens = root / "tokens"
         tokens.mkdir(mode=0o700, parents=True, exist_ok=True)
-        store = cls(root)
-        # A 0.12 record kept an image or a URL in runs. Write each one in the 0.13 form, so 0.14 can drop the read.
-        for app in store.list_apps():
-            if store._record(app.name).read_text() != _format(app):
-                store._write(app)
-        return store
+        return cls(root)
 
     def _record(self, name: str) -> Path:
         return self.root / "apps" / name / "app"
@@ -378,10 +373,6 @@ def _read_app(name: str, text: str) -> App:
         key, _, value = line.partition(" ")
         if key in fields:
             fields[key] = value.strip()
-    if not fields["repo"] and fields["runs"]:
-        # A 0.12 record kept an image or a URL in runs. Remove in 0.14.
-        fields["compose_url" if fields["runs"].startswith("https://") else "image"] = fields["runs"]
-        fields["runs"] = ""
     return App(name, **{**fields, "trigger": fields["trigger"] or "push"})
 
 
