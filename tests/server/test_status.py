@@ -217,25 +217,13 @@ def test_running_plan_is_the_new_plan_only_on_exit_0(state, code, revision):
         assert plan == Deployed(revision="old", runs="Containerfile", kind="containerfile")
 
 
-def test_running_plan_reads_a_0_12_record():
-    """A 0.12 record names the new revision `sha` and the image before it `previous`."""
-    labels = {
-        "yard.sha": "f" * 40,
-        "yard.kind": "containerfile",
-        "yard.image": "localhost/heldso:f",
-        "yard.previous": "localhost/heldso:old",
-    }
+def test_a_record_with_no_revision_or_no_kind_has_no_plan():
+    """A 0.12 record names the revision `sha`, and a record from before 0.12 names no kind: the next check deploys."""
+    labels = {"yard.sha": "f" * 40, "yard.kind": "containerfile", "yard.image": "localhost/heldso:f"}
     done = {"Names": ["deploy-heldso"], "State": "exited", "ExitCode": 0, "Labels": labels}
-    plan = status.running_plan(HELDSO, _listed(done))
-    assert plan is not None and plan.revision == "f" * 40
-    before = {"yard.before.revision": "e" * 40, "yard.before.kind": "containerfile"}
-    failed = {**done, "ExitCode": 1, "Labels": {**labels, **before}}
-    assert status.running_plan(HELDSO, _listed(failed)) == Deployed(
-        revision="e" * 40, kind="containerfile", image="localhost/heldso:old"
-    )
-    # A record from before 0.12 names no kind: no plan, so the next check deploys.
-    old = {**done, "Labels": {"yard.sha": "f" * 40, "yard.image": "localhost/heldso:f"}}
-    assert status.running_plan(HELDSO, _listed(old)) is None
+    assert status.running_plan(HELDSO, _listed(done)) is None
+    no_kind = {**done, "Labels": {"yard.revision": "f" * 40, "yard.image": "localhost/heldso:f"}}
+    assert status.running_plan(HELDSO, _listed(no_kind)) is None
 
 
 def test_a_failed_first_deploy_has_no_plan():
@@ -254,7 +242,11 @@ def test_a_failed_first_deploy_has_no_plan():
 def test_deploy_record_reads_the_labels_and_the_exit_code(state, code, status_, error):
     from app.server.podman import parse_ps
 
-    labels = {"yard.sha": "abc123", "yard.image": "localhost/heldso:abc123", "yard.previous": "localhost/heldso:old"}
+    labels = {
+        "yard.revision": "abc123",
+        "yard.image": "localhost/heldso:abc123",
+        "yard.before.image": "localhost/heldso:old",
+    }
     raw = json.dumps([{"Names": ["deploy-heldso"], "State": state, "ExitCode": code, "Labels": labels}])
     record = status.deploy_record(parse_ps(raw), "heldso")
     assert record is not None
