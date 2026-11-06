@@ -43,18 +43,25 @@ Yard runs any app in a container. A [Stario](https://stario.dev) app needs the l
 
 ## Docs
 
-The docs at [stario.dev/yard](https://stario.dev/yard) read as a short book:
+The docs at [stario.dev/yard](https://stario.dev/yard) read as a short book in four parts.
 
-- [The whole idea](https://stario.dev/yard/the-idea) — Yard in one page: what each tool does and what Yard leaves out.
-- [One push, start to finish](https://stario.dev/yard/one-push) — follow a single commit from your laptop to a live container.
+Start:
+
+- [The whole idea](https://stario.dev/yard/the-idea) — why Yard exists, what each tool does, and what Yard leaves out.
+- [From laptop to live](https://stario.dev/yard/laptop-to-live) — one app from a folder to an HTTPS address, then a change, a setting, and a mistake.
+- [One push, start to finish](https://stario.dev/yard/one-push) — one commit followed from your laptop to a live container.
+
+Use:
+
 - [Set up a host](https://stario.dev/yard/install) — a fresh VM to a working Yard in one script and a few commands.
-- [Your first app](https://stario.dev/yard/first-app) — the four rules an app follows, then one push.
-- [Self-host a service](https://stario.dev/yard/self-host) — run someone else's software from an image or a compose file, and what Yard does not do.
-- [What an app runs](https://stario.dev/yard/what-runs) — how Yard reads a repo, the Containerfile it writes for a Stario app, what it refuses, and how an app runs an image or a compose URL instead.
-- [Day to day](https://stario.dev/yard/day-to-day) — logs, settings, domains, rollbacks, and cleanup.
-- [Your own compose file](https://stario.dev/yard/compose) — workers, sidecars, healthchecks, and apps in any language.
-- [How it works](https://stario.dev/yard/how-it-works) — the internals: files, the check loop, the deploy container, Caddy, journald.
-- [CLI](https://stario.dev/yard/cli-reference), [API](https://stario.dev/yard/api-reference), [Glossary](https://stario.dev/yard/glossary) — the lookup pages.
+- [Self-host a service](https://stario.dev/yard/self-host) — Vaultwarden from an image and Umami from a compose file, with no repo.
+- [Healthchecks](https://stario.dev/yard/healthchecks) — the one line that lets a broken version go back by itself.
+- [Your own compose file](https://stario.dev/yard/compose) — workers, databases, and apps in any language.
+- [Day to day](https://stario.dev/yard/day-to-day) — logs, settings, domains, branch previews, rollbacks, and cleanup.
+
+How it works, one chapter per part of the host: [the host](https://stario.dev/yard/the-host), [Podman](https://stario.dev/yard/podman), [what an app runs](https://stario.dev/yard/what-runs), [deploys](https://stario.dev/yard/deploys), [Caddy](https://stario.dev/yard/caddy), [settings and data](https://stario.dev/yard/settings), [logs and events](https://stario.dev/yard/logs), [forges](https://stario.dev/yard/forges), and [inside Yard](https://stario.dev/yard/how-it-works).
+
+Reference: [CLI](https://stario.dev/yard/cli-reference), [API](https://stario.dev/yard/api-reference), [Glossary](https://stario.dev/yard/glossary).
 
 ## Develop
 

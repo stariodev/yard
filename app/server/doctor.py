@@ -261,8 +261,7 @@ def _healthcheck(app: str, container: str, health: podman.Healthcheck) -> Check:
         return Check(
             f"healthcheck {app}",
             True,
-            "none; a broken build goes live. Add HEALTHCHECK to the Containerfile:"
-            " stario.dev/yard/compose#healthchecks",
+            "none; a broken app stays live. Add HEALTHCHECK to the Containerfile: stario.dev/yard/healthchecks",
             warn=True,
         )
     # Podman runs the first check at start. A check that fails there because the app is not up yet
