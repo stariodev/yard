@@ -17,6 +17,7 @@
 - The labels name the new plan and the plan before it with the same keys: `revision`, `image`, `runs`, `kind`, `reason`, `template`, and `before.*`. A failed `up` brings back the `before.` image, or the `before.` compose file for a compose URL. Yard reads the 0.12 labels `sha` and `previous` for one release.
 - The pre-0.12 fallbacks are gone: Yard no longer guesses the plan from the image of `<name>-app-1`.
 - The template stamp is a hash of every file in `app/server/detect/`. A Yard release that changes a detector, a template, or a pin deploys each `yard:<template>` app once. The first 0.13 boot does that for every such app.
+- Yard's own healthcheck runs every 10 s, not every 60 s. Podman drops `start_interval`, and the first check runs before Yard answers. Thus a deploy of Yard waited a full minute for the second check; it now waits about 10 s.
 
 ### Checks
 
