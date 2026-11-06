@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `yard events` shows the revision of a 0.13 deploy again, and a reverted deploy names the image it brought back. The deploy rows read only the 0.12 labels `sha` and `previous`, so on 0.13.0 and 0.13.1 they had no revision.
+- Yard's own first healthcheck waits for Yard: curl tries once a second for 60 s at most. A deploy of Yard waits as long as Yard boots, not one interval. The checks after the deploy run once an hour, not every 10 s. A Yard that never answers fails the deploy after 60 s and reverts.
+- `yard doctor` accepts a healthcheck with a long interval when its timeout is over 30 s, because that check can wait for the app. Its warning no longer says that Podman runs the first check one interval after start: Podman runs it at start.
 
 ## 0.13.1
 

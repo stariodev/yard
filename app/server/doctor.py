@@ -265,12 +265,15 @@ def _healthcheck(app: str, container: str, health: podman.Healthcheck) -> Check:
             " stario.dev/yard/compose#healthchecks",
             warn=True,
         )
-    if health.interval > 60_000_000_000:
+    # Podman runs the first check at start. A check that fails there because the app is not up yet
+    # runs again one interval later. A check with a timeout over 30 s can wait for the app itself.
+    if health.interval > 60_000_000_000 and health.timeout <= 30_000_000_000:
         return Check(
             f"healthcheck {app}",
             True,
-            f"every {_ns_text(health.interval)}; Podman runs the first check one interval"
-            " after start and a deploy waits 120 s, so use --interval=10s",
+            f"every {_ns_text(health.interval)}; when the first check runs before the app is up,"
+            " the deploy waits one interval and fails after 120 s. Use --interval=10s, or let the check"
+            " wait for the app: curl --retry-connrefused with a --timeout over 30s",
             warn=True,
         )
     detail = f"every {_ns_text(health.interval)}"
@@ -280,8 +283,11 @@ def _healthcheck(app: str, container: str, health: podman.Healthcheck) -> Check:
 
 
 def _ns_text(nanos: int) -> str:
-    """A healthcheck interval: 10s, 5m. Whole minutes drop the 0s."""
+    """A healthcheck interval: 10s, 5m, 1h. Whole minutes and hours drop the zeros."""
     seconds = nanos / 1e9
+    hours, rest = divmod(seconds, 3600)
+    if hours and not rest:
+        return f"{int(hours)}h"
     minutes, rest = divmod(seconds, 60)
     if minutes and not rest:
         return f"{int(minutes)}m"

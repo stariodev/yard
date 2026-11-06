@@ -61,11 +61,12 @@ class Image:
 
 @dataclass(slots=True)
 class Healthcheck:
-    """Config.Healthcheck plus the live State.Health status. Interval is nanoseconds."""
+    """Config.Healthcheck plus the live State.Health status. Interval and timeout are nanoseconds."""
 
     test: list[str] = field(default_factory=list)
     interval: int = 0
     status: str = ""
+    timeout: int = 0
 
 
 class Podman:
@@ -206,6 +207,7 @@ def parse_health(raw: str) -> dict[str, Healthcheck]:
             [str(item) for item in test] if isinstance(test, list) else [],
             _int(check.get("Interval")) if isinstance(check, dict) else 0,
             str(health.get("Status") or "") if isinstance(health, dict) else "",
+            _int(check.get("Timeout")) if isinstance(check, dict) else 0,
         )
     return found
 
