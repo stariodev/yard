@@ -393,8 +393,8 @@ def test_doctor_warns_on_a_missing_healthcheck(tmp_path: Path):
     found = _run(_healthcheck_yard(tmp_path, HEALTH_NONE))
     row = found["healthcheck heldso"]
     assert row["ok"] and row["warn"]
-    assert row["detail"].startswith("none; a broken build goes live")
-    assert "stario.dev/yard/compose#healthchecks" in row["detail"]
+    assert row["detail"].startswith("none; a broken app stays live")
+    assert "stario.dev/yard/healthchecks" in row["detail"]
 
 
 def test_doctor_warns_on_a_slow_healthcheck(tmp_path: Path):
