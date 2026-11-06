@@ -1,5 +1,5 @@
 # Uptime Kuma: a self-hosted status monitor. https://github.com/louislam/uptime-kuma
-# yard app new --runs https://raw.githubusercontent.com/stariodev/yard/main/examples/uptime-kuma.compose.yml --public <host>
+# yard app new --compose-url https://raw.githubusercontent.com/stariodev/yard/main/examples/uptime-kuma.compose.yml --caddy <host>
 services:
   app:
     image: docker.io/louislam/uptime-kuma:1@sha256:70233f4acb5163fd2a59a49909cf01e44415cecff13dba69e3a86647a2919f83
