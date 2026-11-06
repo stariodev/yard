@@ -10,20 +10,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.shared import (
-    TEMPLATES,
     YardError,
     atomic_write,
     check_app_name,
+    check_compose_url,
     check_env,
+    check_image,
     check_name,
     check_ref,
     check_repo,
+    check_runs,
     check_trigger,
     ensure_file,
     format_env,
     now,
     parse_env,
-    parse_runs,
 )
 
 
@@ -111,24 +112,33 @@ def token_hash(plain: str) -> str:
 
 @dataclass(slots=True)
 class App:
+    """One app. Its source is one of repo (with ref and runs), image, or compose_url."""
+
     name: str
-    repo: str
-    ref: str
     trigger: str
     created: str
-    # What the app runs: auto (""), yard:<template>, a repo path, an image, or an https URL.
+    repo: str = ""
+    ref: str = ""
+    # What a repo app runs: "" (auto), yard:<template>, or a path in the repo.
     runs: str = ""
+    image: str = ""
+    compose_url: str = ""
 
 
 @dataclass(slots=True)
 class Deployed:
-    """What a deploy runs: its revision and plan. The deploy container's labels hold it."""
+    """What a deploy runs. The deploy container's labels hold it.
+
+    kind is containerfile, compose, or image. runs is the repo answer: a path or yard:<template>.
+    template is detect.STAMP for a yard:<template> answer.
+    """
 
     revision: str = ""
     runs: str = ""
     kind: str = ""
     reason: str = ""
     template: str = ""
+    image: str = ""
 
 
 @dataclass(slots=True)
@@ -170,8 +180,7 @@ class Store:
             raise YardError(
                 404,
                 "not_found",
-                "app does not exist",
-                context={"name": name},
+                f"app {name} does not exist",
                 help_text="Run yard app ls to see the apps on this host.",
             )
         return _read_app(name, file.read_text())
@@ -179,30 +188,19 @@ class Store:
     def create_app(
         self,
         name: str,
-        repo: str,
+        repo: str = "",
+        *,
         ref: str = "",
-        trigger: str = "",
         runs: str = "",
+        image: str = "",
+        compose_url: str = "",
+        trigger: str = "",
     ) -> App:
         check_app_name(name)
-        if repo:
-            repo = check_repo(repo)
-        ref = ref or ("main" if repo else "")
-        if ref:
-            check_ref(ref)
-        if ref and not repo:
-            raise YardError(
-                400,
-                "bad_ref",
-                f"ref is a branch of the repo, and {name} has no repo",
-                context={"ref": ref, "name": name},
-                help_text="Create an app with a repo to follow a branch.",
-            )
         if self._record(name).is_file():
             raise YardError(409, "exists", "already exists", help_text="Pick another name.")
-        app = App(name, repo, ref, check_trigger(trigger), now())
-        if runs:
-            app.runs = self._check_runs(app, runs)
+        app = App(name, check_trigger(trigger), now())
+        _set_source(app, repo=repo, ref=ref, runs=runs, image=image, compose_url=compose_url)
         self._write(app)
         return app
 
@@ -212,47 +210,41 @@ class Store:
         *,
         repo: str | None = None,
         ref: str | None = None,
-        trigger: str | None = None,
         runs: str | None = None,
+        image: str | None = None,
+        compose_url: str | None = None,
+        trigger: str | None = None,
     ) -> App:
+        """Change the fields that are not None. A new source replaces the old one."""
         app = self.app(name)
-        if repo is not None:
-            app.repo = check_repo(repo)
-        if ref is not None:
-            if not app.repo:
-                raise YardError(
-                    400,
-                    "bad_ref",
-                    f"ref is a branch of the repo, and {name} has no repo",
-                    context={"ref": ref, "name": name},
-                    help_text="An app with no repo has no branch.",
-                )
-            ref = ref or "main"
-            check_ref(ref)
-            app.ref = ref
-        if app.repo and not app.ref:
-            app.ref = "main"
         if trigger is not None:
             app.trigger = check_trigger(trigger)
-        if runs is not None:
-            app.runs = self._check_runs(app, runs) if runs else ""
-        else:
-            # A repo change without a runs change must still satisfy the pair rule.
-            self._check_pair(app, parse_runs(app.runs)[0], app.runs)
+        if "" in (repo, image, compose_url):
+            raise YardError(
+                400,
+                "bad_source",
+                "a source cannot be empty",
+                help_text="To change the source, pass the new one: --repo, --image, or --compose-url.",
+            )
+        given = {key: value for key, value in (("repo", repo), ("image", image), ("compose_url", compose_url)) if value}
+        if len(given) > 1:
+            raise _two_sources()
+        source = {"repo": app.repo, "image": app.image, "compose_url": app.compose_url}
+        if given:
+            source = dict.fromkeys(source, "") | given
+        keep = not given or "repo" in given and check_repo(given["repo"]) == app.repo
+        _set_source(
+            app,
+            **source,
+            ref=ref if ref is not None else (app.ref if keep else ""),
+            runs=runs if runs is not None else (app.runs if keep else ""),
+        )
         self._write(app)
-        return self.app(name)
+        return app
 
     def delete_app(self, name: str) -> None:
-        file = self._record(name)
-        if not file.is_file():
-            raise YardError(
-                404,
-                "not_found",
-                "app does not exist",
-                context={"name": name},
-                help_text="Run yard app ls to see the apps on this host.",
-            )
-        file.unlink()
+        self.app(name)
+        self._record(name).unlink()
 
     def create_token(self, name: str) -> str:
         check_name(name)
@@ -303,7 +295,6 @@ class Store:
                 403,
                 "forbidden",
                 "you cannot delete your own token",
-                context={"name": name},
                 help_text="Ask another token to remove it.",
             )
         path = self.root / "tokens" / name
@@ -311,8 +302,7 @@ class Store:
             raise YardError(
                 404,
                 "not_found",
-                "unknown token",
-                context={"name": name},
+                f"unknown token {name}",
                 help_text="Run yard token ls.",
             )
         path.unlink()
@@ -334,47 +324,17 @@ class Store:
                 return Token(path.name, lines[0])
         return None
 
-    def _check_runs(self, app: App, runs: str) -> str:
-        """Normalize a runs value and check it against the repo."""
-        kind, value = parse_runs(runs)
-        if kind == "template" and value.removeprefix("yard:") not in TEMPLATES:
-            raise YardError(
-                400,
-                "bad_runs",
-                f"unknown template {value}",
-                context={"runs": runs},
-                help_text=f"The templates are {', '.join(f'yard:{t}' for t in TEMPLATES)}.",
-            )
-        self._check_pair(app, kind, value)
-        return value
-
-    def _check_pair(self, app: App, kind: str, value: str) -> None:
-        """A repo app runs a file in it; a repo-less app pulls an image or fetches a URL."""
-        if kind in ("path", "template") and not app.repo:
-            raise YardError(
-                400,
-                "bad_runs",
-                f"{value} is a path in a repo, and {app.name} has no repo",
-                context={"runs": value, "name": app.name},
-                help_text=(f"An image needs a tag, like {value}:1.0. A compose file can come from an https URL."),
-            )
-        if kind in ("image", "url") and app.repo:
-            raise YardError(
-                400,
-                "bad_runs",
-                "an app with a repo runs a file from it",
-                context={"runs": value, "name": app.name},
-                help_text="Use a path, auto, or yard:<template>. To run an image, create an app with no repo.",
-            )
-
     def _write(self, app: App) -> None:
-        text = f"repo {app.repo}\n"
-        if app.ref:
-            text += f"ref {app.ref}\n"
-        text += f"trigger {app.trigger}\ncreated {app.created}\n"
-        if app.runs:
-            text += f"runs {app.runs}\n"
-        atomic_write(self._record(app.name), text)
+        fields = (
+            ("repo", app.repo),
+            ("ref", app.ref),
+            ("runs", app.runs),
+            ("image", app.image),
+            ("compose_url", app.compose_url),
+            ("trigger", app.trigger),
+            ("created", app.created),
+        )
+        atomic_write(self._record(app.name), "".join(f"{key} {value}\n" for key, value in fields if value))
 
     def _env(self, name: str) -> Path:
         return self._record(name).with_name("env")
@@ -404,24 +364,44 @@ def _name_ok(name: str) -> bool:
 
 
 def _read_app(name: str, text: str) -> App:
-    fields = {
-        "repo": "",
-        "ref": "",
-        "trigger": "push",
-        "created": "",
-        "runs": "",
-    }
+    fields = dict.fromkeys(("repo", "ref", "runs", "image", "compose_url", "trigger", "created"), "")
     for line in text.splitlines():
         key, _, value = line.partition(" ")
         if key in fields:
             fields[key] = value.strip()
-    return App(
-        name,
-        fields["repo"],
-        fields["ref"] or ("main" if fields["repo"] else ""),
-        fields["trigger"] or "push",
-        fields["created"],
-        fields["runs"],
+    if not fields["repo"] and fields["runs"]:
+        # A 0.12 record kept an image or a URL in runs. Remove in 0.14.
+        fields["compose_url" if fields["runs"].startswith("https://") else "image"] = fields["runs"]
+        fields["runs"] = ""
+    return App(name, **{**fields, "trigger": fields["trigger"] or "push"})
+
+
+def _set_source(app: App, *, repo: str, ref: str, runs: str, image: str, compose_url: str) -> None:
+    """Check and set the source. One of repo, image, and compose_url; ref and runs belong to a repo."""
+    if sum(1 for value in (repo, image, compose_url) if value) > 1:
+        raise _two_sources()
+    if (ref or runs) and not repo:
+        raise YardError(
+            400,
+            "bad_source",
+            f"ref and runs belong to a repo, and {app.name} has no repo",
+            help_text="Give the app a repo: yard app set --repo https://<forge>/<owner>/<name>",
+        )
+    app.repo = check_repo(repo) if repo else ""
+    app.ref = ref or "main" if repo else ""
+    if app.ref:
+        check_ref(app.ref)
+    app.runs = check_runs(runs) if repo else ""
+    app.image = check_image(image) if image else ""
+    app.compose_url = check_compose_url(compose_url) if compose_url else ""
+
+
+def _two_sources() -> YardError:
+    return YardError(
+        400,
+        "bad_source",
+        "an app has one source: repo, image, or compose_url",
+        help_text="Pass one of --repo, --image, or --compose-url.",
     )
 
 

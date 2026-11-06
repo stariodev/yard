@@ -33,16 +33,15 @@ def test_error_text_matches_stario() -> None:
         400,
         "bad_name",
         "name must be a short lowercase word",
-        context={"name": "Yard"},
         help_text="Start with a letter.",
-        example="heldso",
     )
-    assert str(exc) == (
-        "name must be a short lowercase word\n  Context: name='Yard'\n  Help: Start with a letter.\n  Example:\nheldso"
-    )
+    assert str(exc) == "name must be a short lowercase word\n  Help: Start with a letter."
     body = {"error": exc.payload()}
-    assert body["error"]["code"] == "bad_name"
-    assert body["error"]["help"] == "Start with a letter."
+    assert body["error"] == {
+        "code": "bad_name",
+        "message": "name must be a short lowercase word",
+        "help": "Start with a letter.",
+    }
     assert explain(json.dumps(body)) == str(exc)
 
 
@@ -326,20 +325,22 @@ def test_check_image(tmp_path):
         check_image("postgres:17@sha256:short")
 
 
-def test_parse_runs():
-    from app.shared import YardError, parse_runs
-
-    assert parse_runs("") == ("auto", "")
-    assert parse_runs("auto") == ("auto", "")
-    assert parse_runs("yard:python-uv") == ("template", "yard:python-uv")
-    assert parse_runs("https://example.com/x.yml") == ("url", "https://example.com/x.yml")
-    assert parse_runs("postgres:17") == ("image", "postgres:17")
-    assert parse_runs("ops/stack.yml") == ("path", "ops/stack.yml")
+def test_check_runs_and_check_compose_url():
     import pytest as _p
 
-    for bad in ("http://example.com/x", "ftp://x", "yard:Bad", "yard:", "weird:thing:x"):
+    from app.shared import YardError, check_compose_url, check_runs
+
+    assert check_runs("") == ""
+    assert check_runs("auto") == ""
+    assert check_runs("yard:python-uv") == "yard:python-uv"
+    assert check_runs("ops/stack.yml") == "ops/stack.yml"
+    for bad in ("https://example.com/x.yml", "postgres:17", "yard:Bad", "yard:", "/abs"):
         with _p.raises(YardError):
-            parse_runs(bad)
+            check_runs(bad)
+    assert check_compose_url("https://example.com/x.yml") == "https://example.com/x.yml"
+    for bad in ("http://example.com/x", "ftp://x", "https://" + "x" * 500):
+        with _p.raises(YardError):
+            check_compose_url(bad)
 
 
 def test_image_sha_drops_the_template_suffix():

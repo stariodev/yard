@@ -43,11 +43,11 @@ def remote_repo(remote: str) -> str:
     return f"https://{host}/{found[0]}/{found[1]}"
 
 
-def source_name(kind: str, runs: str) -> str:
-    """The app name for a repo-less app: the image's last repo segment, or the URL file's stem."""
-    if kind == "image":
-        return runs.split("@", 1)[0].rsplit(":", 1)[0].rsplit("/", 1)[-1]
-    tail = runs.rsplit("/", 1)[-1]
+def source_name(image: str, url: str) -> str:
+    """The app name for an image or URL app: the image's last repo segment, or the URL file's stem."""
+    if image:
+        return image.split("@", 1)[0].rsplit(":", 1)[0].rsplit("/", 1)[-1]
+    tail = url.rsplit("/", 1)[-1]
     return tail.removesuffix(".yml").removesuffix(".yaml").removesuffix(".compose")
 
 

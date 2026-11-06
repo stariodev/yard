@@ -111,7 +111,7 @@ def _field_matches(rule: _Rule, record: dict[str, Any]) -> bool:
 
 def _rule(expr: str) -> _Rule:
     if not expr.strip():
-        raise YardError(400, "bad_filter", "bad filter", context={"filter": expr}, help_text=_HELP)
+        raise YardError(400, "bad_filter", f"bad filter {expr!r}", help_text=_HELP)
     found = _FIELD.match(expr)
     if found is None:
         return _Rule(text=expr)
@@ -120,7 +120,7 @@ def _rule(expr: str) -> _Rule:
         try:
             number = float(value)
         except ValueError as exc:
-            raise YardError(400, "bad_filter", "bad filter", context={"filter": expr}, help_text=_HELP) from exc
+            raise YardError(400, "bad_filter", f"bad filter {expr!r}", help_text=_HELP) from exc
         return _Rule(text=expr, key=key, op=op, value=value, number=number)
     return _Rule(text=expr, key=key, op=op, value=value)
 

@@ -117,7 +117,6 @@ class Podman:
                 502,
                 "podman",
                 f"podman {' '.join(args)}: {text}",
-                exit_code=proc.returncode,
                 help_text="Yard talks to Podman through the socket on this host.",
             )
         return text

@@ -29,6 +29,14 @@ _STATE = "state.json"
 _KEY = "key.pem"
 
 
+class ForgeError(YardError):
+    """A forge answered an HTTP error. `upstream` is its status code."""
+
+    def __init__(self, upstream: int, name: str, message: str) -> None:
+        super().__init__(502, name, message)
+        self.upstream = upstream
+
+
 class Forge:
     """One forge app for this host. Subclasses name the API and sign the JWT."""
 
@@ -55,6 +63,10 @@ class Forge:
         self.last_delivery = ""
         self.last_check = ""
         self._tokens: dict[str, tuple[str, float]] = {}
+        # One mint at a time: the checks of many apps on one installation share one token.
+        self._minting = asyncio.Lock()
+        # One refresh at a time: two at once would race on the state file.
+        self._refreshing = asyncio.Lock()
 
     def _state(self) -> dict:
         try:
@@ -168,12 +180,7 @@ class Forge:
                 text = response.read().decode()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace").strip()[:400]
-            raise YardError(
-                502,
-                self.name,
-                f"{self.name} {method} {path}: {exc.code} {detail}".rstrip(),
-                context={"status": exc.code},
-            ) from exc
+            raise ForgeError(exc.code, self.name, f"{self.name} {method} {path}: {exc.code} {detail}".rstrip()) from exc
         except urllib.error.URLError as exc:
             raise YardError(502, self.name, f"{self.name} {method} {path}: {exc.reason}") from exc
         try:
@@ -183,10 +190,11 @@ class Forge:
 
     async def find_installations(self) -> list[dict]:
         """Every installation of the app, saved to state.json. Returns the saved entries."""
-        body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())
-        installations = [self._installation_row(item) for item in self._installation_items(body)]
-        self.save(installations=installations)
-        return installations
+        async with self._refreshing:
+            body = await self._call("GET", "/app/installations?per_page=100", self.app_jwt())
+            installations = [self._installation_row(item) for item in self._installation_items(body)]
+            self.save(installations=installations)
+            return installations
 
     async def token(self, repo: str = "") -> str:
         """An installation access token for the repo's owner, or the first installation.
@@ -205,7 +213,10 @@ class Forge:
                 f"{self.name} has no installation",
                 help_text=f"Run yard forge setup {self.name}.",
             )
-        installation = str(installation.get("id") or "")
+        async with self._minting:
+            return await self._mint(str(installation.get("id") or ""))
+
+    async def _mint(self, installation: str) -> str:
         cached = self._tokens.get(installation)
         if cached and cached[1] - 60 > time.time():
             return cached[0]
@@ -249,9 +260,8 @@ class Forge:
             )
         try:
             full = await self._make_repo(installation, owner, name)
-        except YardError as exc:
-            status = exc.context.get("status")
-            if status in (409, 422):
+        except ForgeError as exc:
+            if exc.upstream in (409, 422):
                 raise YardError(
                     409,
                     "repo_exists",
@@ -261,7 +271,7 @@ class Forge:
                         f" git remote add origin https://{self.host}/{owner}/{name}.git"
                     ),
                 ) from exc
-            if status in (403, 404):
+            if exc.upstream in (403, 404):
                 raise YardError(
                     403,
                     "repo_permission",
@@ -589,9 +599,9 @@ class GitHub(Forge):
                 self.app_jwt(),
                 {"repositories": [name], "permissions": {"contents": "write"}},
             )
-        except YardError as exc:
+        except ForgeError as exc:
             # GitHub answers 422 for a repo the installation cannot see or a permission it lacks.
-            if exc.context.get("status") not in (403, 404, 422):
+            if exc.upstream not in (403, 404, 422):
                 raise
             raise YardError(
                 403,

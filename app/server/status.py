@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.server import journal, podman, sites
+from app.server.detect import STAMP
 from app.server.podman import Container, Sample
 from app.server.store import App, Deployed
 from app.server.yard import Tip
-from app.shared import YardError, app_container, deploy_container, image_sha, parse_runs, stamp
+from app.shared import YardError, app_container, deploy_container, image_sha, stamp
 
 if TYPE_CHECKING:
     from app.server.yard import Yard
@@ -29,6 +30,11 @@ class Record:
     error: str
     started: str
     ended: str
+
+
+def template_moved(plan: Deployed | None) -> bool:
+    """True when the plan runs a Containerfile that Yard wrote with other templates than it has now."""
+    return bool(plan and plan.runs.startswith("yard:") and plan.template != STAMP)
 
 
 def deploy_status(code: int) -> str:
@@ -194,58 +200,33 @@ async def get_plan(yard: Yard, app: App) -> Deployed | None:
 def running_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
     """What the app runs now, read from its deploy container. None before the first good deploy.
 
-    Exit 0 means the new plan runs. Any other end, or a deploy that still runs,
-    means the plan before it runs. The labels hold both, so a Yard restart in the
-    middle of a deploy loses nothing.
+    Exit 0 means the new plan runs. Any other end, or a deploy that still runs, means the plan
+    before it runs. The labels hold both, so a Yard restart in the middle of a deploy loses nothing.
     """
     item = listed.get(deploy_container(app.name))
-    labels = item.labels if item else {}
-    if item is None or not labels.get("sha"):
-        # A host from before the deploy labels: the image of the app container.
-        return _image_plan(app, listed)
-    if not item.running and item.exit_code == 0:
-        plan = _labels_plan(labels, "")
-        if not plan.kind:
-            # A 0.11.0 record names the sha and the image, not the plan.
-            image = _image_plan(app, {app_container(app.name): Container(image=labels.get("image", ""))}) or Deployed()
-            plan.runs, plan.kind, plan.template = image.runs, image.kind, image.template
-        return plan
-    before = _labels_plan(labels, "before.")
-    return before if before.revision else _image_plan(app, listed)
+    if item is None:
+        return None
+    done = not item.running and item.exit_code == 0
+    plan = labels_plan(item.labels, "" if done else "before.")
+    # A record from before 0.12 names no kind: it counts as no plan, and the next check deploys.
+    return plan if plan.revision and plan.kind else None
 
 
-def last_try(listed: dict[str, Container], name: str) -> tuple[str, str, str]:
-    """The (revision, template, runs) the last deploy tried, whatever its end."""
+def tried_plan(listed: dict[str, Container], name: str) -> Deployed | None:
+    """The plan the last deploy tried, whatever its end."""
     item = listed.get(deploy_container(name))
-    labels = item.labels if item else {}
-    return labels.get("sha", ""), labels.get("template", ""), labels.get("runs", "")
+    return labels_plan(item.labels) if item else None
 
 
-def _labels_plan(labels: dict[str, str], prefix: str) -> Deployed:
-    return Deployed(
-        revision=labels.get(f"{prefix}revision" if prefix else "sha", ""),
-        runs=labels.get(f"{prefix}runs", ""),
-        kind=labels.get(f"{prefix}kind", ""),
-        reason=labels.get(f"{prefix}reason", ""),
-        template=labels.get(f"{prefix}template", ""),
-    )
-
-
-def _image_plan(app: App, listed: dict[str, Container]) -> Deployed | None:
-    """The plan the app container's image names: `localhost/<name>:<sha12>-<tpl8>` for a repo app,
-    `<ref>@sha256:...` for an image app. A URL app's image does not name its file: None."""
-    item = listed.get(app_container(app.name))
-    if item is None or not item.image:
-        return None
-    kind, _value = parse_runs(app.runs)
-    if not app.repo and kind == "image":
-        _ref, at, digest = item.image.partition("@")
-        return Deployed(revision=digest, runs=app.runs, kind="image") if at else None
-    if not app.repo or not item.image.startswith(f"localhost/{app.name}:"):
-        return None
-    revision = image_sha(item.image)
-    tag = item.image.rpartition(":")[2]
-    return Deployed(revision=revision, template=tag[len(revision) + 1 :])
+def labels_plan(labels: dict[str, str], prefix: str = "") -> Deployed:
+    """A plan from the deploy container's labels: the new plan, or with prefix "before." the plan before it."""
+    plan = Deployed(**{key: labels.get(prefix + key, "") for key in Deployed.__dataclass_fields__})
+    # A 0.12 record names the new revision `sha` and the image before it `previous`. Remove in 0.14.
+    if prefix:
+        plan.image = plan.image or labels.get("previous", "")
+    else:
+        plan.revision = plan.revision or labels.get("sha", "")
+    return plan
 
 
 def deploy_record(listed: dict[str, Container], name: str) -> Record | None:
@@ -253,17 +234,16 @@ def deploy_record(listed: dict[str, Container], name: str) -> Record | None:
     item = listed.get(deploy_container(name))
     if item is None:
         return None
-    labels = item.labels
-    previous = labels.get("previous", "")
+    plan, before = labels_plan(item.labels), labels_plan(item.labels, "before.")
     return Record(
         app=name,
-        sha=labels.get("sha", ""),
-        image=labels.get("image", ""),
+        sha=plan.revision,
+        image=plan.image,
         status="running" if item.running else deploy_status(item.exit_code),
-        cause=labels.get("cause", ""),
-        actor=labels.get("actor", ""),
-        previous=previous,
-        error=labels.get("error", "") or ("" if item.running else deploy_error(item.exit_code, previous)),
+        cause=item.labels.get("cause", ""),
+        actor=item.labels.get("actor", ""),
+        previous=before.image,
+        error=item.labels.get("error", "") or ("" if item.running else deploy_error(item.exit_code, before.image)),
         started=stamp(item.started) if item.started else "",
         ended=stamp(item.exited) if item.exited and not item.running else "",
     )
@@ -375,7 +355,7 @@ def _row(
         image=image,
         sha=(deployed.revision if deployed and deployed.revision else image_sha(image)) if app else image_sha(image),
         tip=tip.revision if tip else "",
-        template_moved=bool(tip and tip.template and tip.template != (deployed.template if deployed else "")),
+        template_moved=template_moved(deployed),
         hosts=hosts,
         trigger=app.trigger if app else "",
         cpu=sample.cpu if sample else "",

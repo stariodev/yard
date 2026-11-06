@@ -244,7 +244,7 @@ def format_apps(rows: list, *, color: bool = False) -> str:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        source = str(row.get("repo") or row.get("runs") or "auto")
+        source = str(row.get("repo") or row.get("image") or row.get("compose_url") or "")
         ref = str(row.get("ref") or "") if row.get("repo") else ""
         body.append([str(row.get("name") or ""), source, ref, str(row.get("trigger") or "")])
     return _render(["app", "source", "ref", "trigger"], body, color=color)
@@ -341,7 +341,7 @@ def format_record(body: str) -> str:
 
 def _runs_text(record: dict) -> str:
     """The runs line: the record's value plus what the last deploy answered."""
-    shown = str(record.get("runs") or "") or "auto"
+    shown = str(record.get("runs") or "") or ("" if record.get("image") or record.get("compose_url") else "auto")
     deployed = record.get("deployed")
     if not isinstance(deployed, dict):
         return f"{shown} (not deployed yet)"
@@ -356,7 +356,7 @@ def _runs_text(record: dict) -> str:
     reason = str(deployed.get("reason") or "")
     if reason:
         inner += f"; {reason}"
-    return f"{text} ({inner})" if inner else text
+    return f"{text} ({inner})".strip() if inner else text
 
 
 # --- render and time -------------------------------------------------------

@@ -18,7 +18,6 @@ async def create_repo(yard: Yard, name: str, owner: str = "", forge_name: str = 
                 "owner_required",
                 "name the owner account",
                 help_text=f"The installations: {', '.join(accounts) or 'none'}.",
-                example="yard repo new --owner ACCOUNT",
             )
         owner = accounts[0]
     repo = await forge.create_repo(owner, name)

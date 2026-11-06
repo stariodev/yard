@@ -25,7 +25,7 @@ def _config(root: Path) -> Config:
 
 
 def _app(name: str, trigger: str = "") -> App:
-    return App(name, "https://origin.cursor.com/org/heldso", "main", trigger or "push", "")
+    return App(name, trigger or "push", "", repo="https://origin.cursor.com/org/heldso", ref="main")
 
 
 def _checkout(root: Path, files: dict[str, str], name: str = "heldso") -> Path:
@@ -75,16 +75,14 @@ def test_run_env_is_the_interpolation_env(tmp_path: Path):
 def test_project_containerfile_composes_app_and_build(tmp_path: Path):
     config = _config(tmp_path)
     checkout = _checkout(tmp_path, {"Containerfile": "FROM scratch\n"})
-    found = project(config, _app("heldso"), Deployed(revision="abc", runs="Containerfile", kind="containerfile"))
+    plan = Deployed(revision="abc", runs="Containerfile", kind="containerfile", image="localhost/heldso:abc")
+    found = project(config, _app("heldso"), plan)
     assert found.files == [APP_COMPOSE, BUILD_COMPOSE]
     assert found.env["DOCKERFILE"] == "Containerfile"
     assert found.env["CHECKOUT"] == str(checkout)
     assert found.image == "localhost/heldso:abc"
-    written = project(
-        config, _app("heldso"), Deployed(revision="abc", runs="yard:go", kind="containerfile", template="3f9a1c2e")
-    )
+    written = project(config, _app("heldso"), Deployed(revision="abc", runs="yard:go", kind="containerfile"))
     assert written.env["DOCKERFILE"] == str(tmp_path / "apps" / "heldso" / "Containerfile")
-    assert written.image == "localhost/heldso:abc-3f9a1c2e"
     assert found.env["YARD_FILES"] == "1"
     env_file = tmp_path / "apps" / "heldso" / "env"
     assert env_file.read_text() == ""
@@ -100,20 +98,20 @@ def test_project_repo_compose_is_one_file(tmp_path: Path):
 
 def test_project_image_app_is_app_only(tmp_path: Path):
     config = _config(tmp_path)
-    app = App("db", "", "main", "push", "", "postgres:17")
-    found = project(config, app, Deployed(revision="sha256:" + "a" * 64, runs=app.runs, kind="image"))
+    app = App("db", "push", "", image="postgres:17")
+    found = project(config, app, Deployed(revision="sha256:" + "a" * 64, kind="image", image="postgres:17@x"))
     assert found.files == [APP_COMPOSE]
-    assert found.image == f"postgres:17@sha256:{'a' * 64}"
+    assert found.env["IMAGE"] == "postgres:17@x"
     assert found.env["CHECKOUT"] == str(config.app_dir("db"))
     assert found.env["YARD_FILES"] == "1"
 
 
 def test_project_url_compose_is_the_copy(tmp_path: Path):
     config = _config(tmp_path)
-    app = App("u", "", "main", "push", "", "https://example.com/x.yml")
+    app = App("u", "push", "", compose_url="https://example.com/x.yml")
     rev = "sha256:" + "b" * 64
     found = project(config, app, Deployed(revision=rev, runs=app.runs, kind="compose"))
-    assert found.image == f"compose:{rev[7:19]}"
+    assert found.image == ""
     assert found.files == [str(tmp_path / "apps" / "u" / "compose" / f"{rev[7:19]}.yml")]
 
 
@@ -135,7 +133,8 @@ def test_saved_project_rebuilds_from_the_running_plan(tmp_path: Path):
     (checkout / "Containerfile").write_text("FROM scratch\n")
     _git(checkout)
     sha = _git_out(checkout, "rev-parse", "HEAD")
-    found = saved_project(config, _app("heldso"), Deployed(revision=sha, runs="Containerfile", kind="containerfile"))
+    plan = Deployed(revision=sha, runs="Containerfile", kind="containerfile", image=image_tag("heldso", sha))
+    found = saved_project(config, _app("heldso"), plan)
     assert found is not None
     assert found.files == [APP_COMPOSE, BUILD_COMPOSE]
     assert found.env["IMAGE"] == image_tag("heldso", sha)
@@ -145,11 +144,8 @@ def test_saved_project_rebuilds_from_the_running_plan(tmp_path: Path):
     found = saved_project(config, _app("heldso"), Deployed(revision=sha, runs="compose.yml", kind="compose"))
     assert found is not None and found.files == [str(checkout / "compose.yml")]
 
-    found = saved_project(
-        config, _app("heldso"), Deployed(revision=sha, runs="yard:python-uv", kind="containerfile", template="3f9a1c2e")
-    )
+    found = saved_project(config, _app("heldso"), Deployed(revision=sha, runs="yard:python-uv", kind="containerfile"))
     assert found is not None
-    assert found.env["IMAGE"] == image_tag("heldso", sha, "3f9a1c2e")
     assert found.env["DOCKERFILE"] == str(tmp_path / "apps" / "heldso" / "Containerfile")
 
     assert saved_project(config, _app("other"), None) is None
@@ -157,11 +153,12 @@ def test_saved_project_rebuilds_from_the_running_plan(tmp_path: Path):
 
 def test_saved_project_image_app(tmp_path: Path):
     config = _config(tmp_path)
-    app = App("db", "", "main", "push", "", "postgres:17")
-    found = saved_project(config, app, Deployed(revision="sha256:" + "a" * 64, runs="postgres:17", kind="image"))
+    app = App("db", "push", "", image="postgres:17")
+    image = "postgres:17@sha256:" + "a" * 64
+    found = saved_project(config, app, Deployed(revision="sha256:" + "a" * 64, kind="image", image=image))
     assert found is not None
     assert found.files == [APP_COMPOSE]
-    assert found.env["IMAGE"] == "postgres:17@sha256:" + "a" * 64
+    assert found.env["IMAGE"] == image
 
 
 def test_saved_project_url_compose(tmp_path: Path):
@@ -170,51 +167,87 @@ def test_saved_project_url_compose(tmp_path: Path):
     copy = tmp_path / "apps" / "u" / "compose" / f"{rev[7:19]}.yml"
     copy.parent.mkdir(parents=True)
     copy.write_text("services: {}\n")
-    app = App("u", "", "main", "push", "", "https://example.com/x.yml")
+    app = App("u", "push", "", compose_url="https://example.com/x.yml")
     found = saved_project(config, app, Deployed(revision=rev, runs=app.runs, kind="compose"))
     assert found is not None and found.files == [str(copy)]
 
 
-def test_apply_runs_one_podman_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    config = _config(tmp_path)
-    calls: list[list[str]] = []
+class _Host(Podman):
+    """Records each podman call. `logs -f` prints the lines, `wait` prints the exit code."""
 
-    async def fake_stream(self, *args, on_line=None):
-        calls.append(self._args(args))
-        return 0, "== build\n"
+    def __init__(self, logs: str = "", code: int = 0) -> None:
+        super().__init__("podman", True)
+        self.calls: list[list[str]] = []
+        self.logs, self.code = logs, code
 
-    monkeypatch.setattr(Podman, "stream", fake_stream)
+    async def run(self, *args: str, timeout=None) -> str:
+        self.calls.append(self._args(args))
+        return "c0ffee"
+
+    async def stream(self, *args: str, on_line=None) -> tuple[int, str]:
+        self.calls.append(self._args(args))
+        text = self.logs if args[0] == "logs" else f"{self.code}\n" if args[0] == "wait" else ""
+        for line in text.splitlines():
+            if on_line is not None:
+                on_line(line)
+        return 0, text
+
+
+def _host(monkeypatch: pytest.MonkeyPatch, host: _Host) -> _Host:
+    monkeypatch.setattr(compose, "_podman", lambda _config: host)
+    return host
+
+
+def test_run_starts_one_detached_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    host = _host(monkeypatch, _Host(logs="== sync\n== build\n", code=3))
     found = compose.Project(
         "heldso",
         ["/checkout/compose.yml"],
         {"DATA_DIR": f"{tmp_path}/data/heldso", "IMAGE": "localhost/heldso:abc", "PROJECT_NAME": "heldso"},
     )
-
-    code, text = asyncio.run(compose.apply(config, "heldso", "up", found))
-    assert code == 0
+    lines: list[str] = []
+    code = asyncio.run(
+        compose.run(
+            _config(tmp_path), "heldso", "up", found, labels={"revision": "abc"}, log=["== sync"], on_line=lines.append
+        )
+    )
+    assert code == 3
     # A plain rm first: Podman refuses to remove a running deploy container, so a running deploy is never replaced.
-    assert calls[0] == ["podman", "--remote", "rm", "deploy-heldso"]
-    argv = calls[1]
+    assert host.calls[0] == ["podman", "--remote", "rm", "deploy-heldso"]
+    argv = host.calls[1]
     assert "--replace" not in argv
-    assert argv[:12] == [
-        "podman",
-        "--remote",
-        "run",
-        "--name",
-        "deploy-heldso",
-        "--network",
-        "yard",
-        "-v",
-        "/run/podman.sock:/run/podman/podman.sock",
-        "-v",
-        f"{tmp_path}:{tmp_path}",
-        "-e",
-    ]
-    assert "COMPOSE_FILE=/checkout/compose.yml" in argv
+    assert argv[:6] == ["podman", "--remote", "run", "-d", "--name", "deploy-heldso"]
+    assert "yard.revision=abc" in argv and "COMPOSE_FILE=/checkout/compose.yml" in argv
+    assert "YARD_LOG=== sync" in argv
+    assert argv[-2:] == ["localhost/yard-apply", "up"]
+    assert host.calls[2][-3:] == ["logs", "-f", "deploy-heldso"]
+    assert host.calls[3][-2:] == ["wait", "deploy-heldso"]
+    # The follower already has the lines Yard wrote; the container prints them first.
+    assert lines == ["== build"]
 
-    asyncio.run(compose.apply(config, "yard", "up", found, detach=True))
-    argv = calls[-1]
-    assert argv[-3:] == ["-d", "localhost/yard-apply", "up"]
+
+def test_a_fail_container_prints_the_tail_of_a_long_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A 5000-line build log would pass the argv limit of one string. The record keeps its end."""
+    host = _host(monkeypatch, _Host(code=1))
+    lines = [f"step {n} " + "x" * 60 for n in range(5000)] + ["!! the error"]
+    code = asyncio.run(compose.run(_config(tmp_path), "heldso", "fail", None, labels={"error": "no"}, log=lines))
+    assert code == 1
+    argv = host.calls[1]
+    log = next(arg for arg in argv if arg.startswith("YARD_LOG="))
+    assert len(log.encode()) < 128 << 10
+    assert log.endswith("!! the error")
+    assert not any(arg.startswith("COMPOSE_FILE=") for arg in argv)
+    assert argv[-2:] == ["localhost/yard-apply", "fail"]
+
+
+def test_wait_without_a_code_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class _Gone(_Host):
+        async def stream(self, *args: str, on_line=None) -> tuple[int, str]:
+            return 125, "Error: no such container\n"
+
+    _host(monkeypatch, _Gone())
+    with pytest.raises(YardError, match="no such container"):
+        asyncio.run(compose.wait(_config(tmp_path), "heldso"))
 
 
 def test_install_sh_runs_the_first_apply():
@@ -273,19 +306,13 @@ def test_install_sh_and_apply_pass_the_same_env_names(tmp_path: Path, monkeypatc
     shell_names = set(re.findall(r"-e ([A-Z_]+)=", block))
 
     config = _config(tmp_path)
-    calls: list[list[str]] = []
-
-    async def fake_stream(self, *args, on_line=None):
-        calls.append(self._args(args))
-        return 0, ""
-
-    monkeypatch.setattr(Podman, "stream", fake_stream)
+    host = _host(monkeypatch, _Host())
     _checkout(tmp_path, {"ops/compose.yml": FULL}, "yard")
     found = project(config, _app("yard"), Deployed(revision="abc", runs="ops/compose.yml", kind="compose"))
-    asyncio.run(compose.apply(config, "yard", "up", found))
-    argv = calls[-1]
+    asyncio.run(compose.start(config, "yard", "up", found, labels={}, log=[]))
+    argv = host.calls[-1]
     python_names = {value.split("=", 1)[0] for flag, value in zip(argv, argv[1:], strict=False) if flag == "-e"}
-    assert python_names == shell_names
+    assert python_names - {"YARD_LOG"} == shell_names
 
 
 def test_the_apply_files_meet_the_contract():
@@ -324,48 +351,3 @@ def test_the_apply_files_meet_the_contract():
 def test_image_tag():
     assert image_tag("mono", "abc1234def") == "localhost/mono:abc1234def"
     assert image_tag("yard", "abc", "3f9a1c2e") == "localhost/yard:abc-3f9a1c2e"
-
-
-def test_record_failure_runs_a_deploy_container_that_prints_and_exits_1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    config = _config(tmp_path)
-    calls: list[list[str]] = []
-
-    async def fake_stream(self, *args, on_line=None):
-        calls.append(self._args(args))
-        return 1, ""
-
-    monkeypatch.setattr(Podman, "stream", fake_stream)
-    asyncio.run(compose.record_failure(config, "heldso", {"sha": "abc", "error": "no"}, ["== sync", "!! no"]))
-    assert calls[0][-2:] == ["rm", "deploy-heldso"]
-    argv = calls[1]
-    assert argv[argv.index("--name") + 1] == "deploy-heldso"
-    assert "--replace" not in argv
-    assert "yard.error=no" in argv and "yard.sha=abc" in argv
-    assert "YARD_LOG=== sync\n!! no" in argv
-    assert argv[-3:] == ["localhost/yard-apply", "-c", 'printf "%s\\n" "$YARD_LOG"; exit 1']
-
-
-def test_record_failure_keeps_the_tail_of_a_long_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A 5000-line build log would pass the argv limit of one string. The record keeps its end."""
-    calls: list[tuple[str, ...]] = []
-
-    async def fake_stream(self, *args, on_line=None):
-        calls.append(args)
-        return 1, ""
-
-    monkeypatch.setattr(Podman, "stream", fake_stream)
-    lines = [f"step {n} " + "x" * 60 for n in range(5000)] + ["!! the error"]
-    asyncio.run(compose.record_failure(_config(tmp_path), "heldso", {}, lines))
-    log = next(arg for arg in calls[1] if arg.startswith("YARD_LOG="))
-    assert len(log.encode()) < 128 << 10
-    assert log.endswith("!! the error")
-
-
-def test_record_failure_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    async def broken(self, *args, on_line=None):
-        raise YardError(502, "podman", "podman is gone")
-
-    monkeypatch.setattr(Podman, "stream", broken)
-    asyncio.run(compose.record_failure(_config(tmp_path), "heldso", {}, []))

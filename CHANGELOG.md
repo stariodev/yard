@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Breaking
+
+- An app has one source: `repo` (with `ref` and `runs`), `image`, or `compose_url`. `yard app new` and `yard app set` take `--image NAME:TAG` and `--compose-url URL`. `--runs` names a file in the repo only: `auto`, a path, or `yard:<template>`. A `--runs postgres:17` or a `--runs https://...` gets a 400 that names the new flag. A new source in `yard app set` replaces the old one; a repo app that moves to an image drops its `ref` and `runs`.
+- Yard reads a 0.12 app record with an image or a URL in `runs` as the new field.
+- An API error is `{"code", "message", "help"}`. `context` and `example` are gone; a bad value is in the message.
+- `yard app cat compose` prints the compose files of the running project, and `yard app cat containerfile` prints its `DOCKERFILE`. An app with no `DOCKERFILE` gets one 404: it builds no image from a Containerfile that Yard knows. One file prints as it is; several files print each under a `# <name>` line.
+
+### Deploys
+
+- Every deploy starts `deploy-<name>` detached, follows its log, and waits for its exit code. A deploy of Yard itself runs the same way, and the `pending` status is gone.
+- The deploy container prints the lines Yard wrote before it started (sync, detect, pull, fetch). `yard app logs --deploy` now shows them for every deploy, not only for a failed one.
+- A deploy that fails before the apply runs the same container with the command `fail`. When Podman cannot start it, the deploy still reports the first error.
+- The labels name the new plan and the plan before it with the same keys: `revision`, `image`, `runs`, `kind`, `reason`, `template`, and `before.*`. A failed `up` brings back the `before.` image, or the `before.` compose file for a compose URL. Yard reads the 0.12 labels `sha` and `previous` for one release.
+- The pre-0.12 fallbacks are gone: Yard no longer guesses the plan from the image of `<name>-app-1`.
+- The template stamp is a hash of every file in `app/server/detect/`. A Yard release that changes a detector, a template, or a pin deploys each `yard:<template>` app once. The first 0.13 boot does that for every such app.
+
+### Checks
+
+- One worker checks the apps. The timer asks for every app, and a webhook asks for the push apps of one repo. Each app has at most one check at a time, and a request during that check runs once after it. The 10 s debounce is gone.
+- A deploy that follows a running deploy asks for another check, so the newest revision still deploys.
+- Every app with a source records its tip, a manual app too. A repo app on a forge that is not connected shows that in its tip error.
+- The forge mints one token at a time, so many checks on one installation share one token.
+
+### Other
+
 - Yard locks stario 5.3.4. Its wheels ship without debug info, so the Yard image is about 12 MB smaller.
 
 ## 0.12.0

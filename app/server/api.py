@@ -64,6 +64,10 @@ async def json_object(c: Context) -> dict:
     return body
 
 
+# The fields of an app that a POST or a PATCH sets.
+SOURCE_FIELDS = ("repo", "ref", "runs", "image", "compose_url", "trigger")
+
+
 def app_fields(body: dict, allowed: set[str]) -> dict[str, str]:
     """The fields an app PATCH or POST takes. An unknown key is a 400."""
     fields: dict[str, str] = {}
@@ -73,8 +77,7 @@ def app_fields(body: dict, allowed: set[str]) -> dict[str, str]:
                 400,
                 "unknown_field",
                 f"unknown field {key}",
-                context={"field": key},
-                help_text="This Yard takes name, repo, ref, trigger, runs. Upgrade the CLI: uv tool upgrade staryard",
+                help_text="This Yard takes name, repo, ref, runs, image, compose_url, trigger. Upgrade the CLI: uv tool upgrade staryard",
             )
         if key == "name":
             continue
@@ -89,9 +92,11 @@ def app_json(app: App, deployed: Deployed | None = None) -> dict[str, Any]:
         "name": app.name,
         "repo": app.repo,
         "ref": app.ref,
+        "runs": app.runs,
+        "image": app.image,
+        "compose_url": app.compose_url,
         "trigger": app.trigger,
         "created": app.created,
-        "runs": app.runs,
         "deployed": asdict(deployed) if deployed else None,
     }
 
@@ -144,7 +149,7 @@ def _hook_received(config: Config, forge: Forge, repo: str, kind: str, c: Contex
 
 def _job_json(job: Job) -> dict[str, Any]:
     """A deploy while it runs. Its end is the job's outcome, the same values the deploy container keeps."""
-    outcome = job.outcome or {}
+    outcome = job.record or {}
     return {
         "id": job.id,
         "app": job.app,
@@ -327,9 +332,8 @@ def _log_time(value: str) -> str:
     raise YardError(
         400,
         "bad_time",
-        "bad time",
+        f"bad time {value!r}",
         help_text='since/until: -15m, -1h, -2d, or "2025-01-31 14:00".',
-        context={"value": value},
     )
 
 
@@ -420,7 +424,6 @@ def bearer(store: Store) -> Middleware:
                             "unauthorized",
                             "unauthorized",
                             help_text="Pass a live token, or run yard login.",
-                            example="Authorization: Bearer <token>",
                         ).payload()
                     },
                     401,
@@ -476,10 +479,10 @@ class HooksPage:
         )
         if action == "push" and repo:
             _hook_received(self.yard.config, forge, repo, event, c)
-            c.app.create_task(apps.check_repo(self.yard, repo))
+            apps.check_repo(self.yard, repo, f"webhook:{forge.name}")
         elif action == "installation":
             _hook_received(self.yard.config, forge, "", event, c)
-            c.app.create_task(apps.check_installation(self.yard, forge))
+            c.app.create_task(apps.refresh_installations(self.yard, forge))
         w.empty(204)
 
 
@@ -518,7 +521,6 @@ class HostPage:
                 "bad_json",
                 "bad json",
                 help_text="days is a number 1 or more. dry is true or false.",
-                example='{"days": 7, "dry": false}',
             )
         w.json(cast(JsonValue, asdict(await apps.prune(self.yard, days, dry, actor=_actor(c)))))
 
@@ -573,7 +575,6 @@ class HostPage:
                 "bad_json",
                 "bad json",
                 help_text="name, owner, and forge are strings.",
-                example='{"name": "heldso"}',
             )
         w.json(cast(JsonValue, await repos.create_repo(self.yard, name, owner, forge, actor=_actor(c))))
 
@@ -586,7 +587,6 @@ class HostPage:
                 "bad_json",
                 "bad json",
                 help_text="repo is a string.",
-                example='{"repo": "https://github.com/org/heldso"}',
             )
         w.json(cast(JsonValue, await repos.repo_token(self.yard, repo, actor=_actor(c))))
 
@@ -704,35 +704,23 @@ class AppsPage:
 
     async def apps_create(self, c: Context, w: Writer) -> None:
         data = await json_object(c)
-        fields = app_fields(data, {"name", "repo", "ref", "trigger", "runs"})
+        fields = app_fields(data, {"name", *SOURCE_FIELDS})
         name = data.get("name", "")
-        repo = fields.pop("repo", "")
-        if not isinstance(name, str) or not isinstance(repo, str):
-            raise YardError(
-                400,
-                "bad_json",
-                "bad json",
-                help_text="name and repo are strings.",
-            )
-        if not name.strip():
+        if not isinstance(name, str) or not name.strip():
             raise YardError(
                 400,
                 "bad_json",
                 "name is required",
-                context={"field": "name"},
                 help_text="An app name uses lowercase letters, digits, and -",
-                example="staging",
             )
-        if not repo.strip() and not fields.get("runs", "").strip():
+        if not any(fields.get(key, "").strip() for key in ("repo", "image", "compose_url")):
             raise YardError(
                 400,
                 "bad_json",
-                "repo is required",
-                context={"field": "repo"},
-                help_text="The repo as a full https URL; for a repo-less app pass an image or a URL in runs.",
-                example="https://github.com/org/heldso",
+                "a source is required: repo, image, or compose_url",
+                help_text="repo is a forge https URL, image is name:tag, compose_url is an https compose file.",
             )
-        app = apps.create(self.yard, name, repo, actor=_actor(c), **cast(dict[str, Any], fields))
+        app = apps.create(self.yard, name, actor=_actor(c), **fields)
         w.json(cast(JsonValue, {"app": cast(JsonValue, app_json(app))}))
 
     async def app_page(self, c: Context, w: Writer) -> None:
@@ -741,15 +729,15 @@ class AppsPage:
 
     async def app_patch(self, c: Context, w: Writer) -> None:
         name = c.match.params["name"]
-        fields = app_fields(await json_object(c), {"repo", "ref", "trigger", "runs"})
+        fields = app_fields(await json_object(c), set(SOURCE_FIELDS))
         if not fields:
             raise YardError(
                 400,
                 "bad_json",
                 "nothing to change",
-                help_text="Set one of repo, ref, trigger, or runs.",
+                help_text=f"Set one of {', '.join(SOURCE_FIELDS)}.",
             )
-        app = apps.update(self.yard, name, actor=_actor(c), **cast(dict[str, Any], fields))
+        app = apps.update(self.yard, name, actor=_actor(c), **fields)
         w.json(cast(JsonValue, {"app": app_json(app, await status.get_plan(self.yard, app))}))
 
     async def app_delete(self, c: Context, w: Writer) -> None:
@@ -788,7 +776,7 @@ class AppsPage:
                 w.json(cast(JsonValue, {"deploy": body}))
                 return
             if job is None:
-                raise YardError(404, "not_found", f"{name} has no deploy yet", context={"app": name})
+                raise YardError(404, "not_found", f"{name} has no deploy yet")
         if c.req.query.get("follow") != "1":
             body = _job_json(job)
             body["lines"] = job.lines
@@ -839,7 +827,6 @@ class AppsPage:
                     "bad_json",
                     "bad json",
                     help_text="env is an object of strings or null.",
-                    example='{"KEY": null}',
                 )
             patch[key] = value
         keys = self.yard.store.patch_env(name, patch)
@@ -864,7 +851,6 @@ class AppsPage:
                     "bad_json",
                     "bad json",
                     help_text="env is an object of strings.",
-                    example='{"KEY": "value"}',
                 )
             env[key] = value
         removed = sorted(set(self.yard.store.read_env(name)) - set(env))

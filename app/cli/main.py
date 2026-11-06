@@ -33,15 +33,17 @@ from app.shared import (
     app_container,
     atomic_write,
     check_app_name,
+    check_compose_url,
     check_domain,
+    check_image,
     check_repo,
+    check_runs,
     default_site,
     deploy_container,
     explain,
     format_bytes,
     format_env,
     parse_env,
-    parse_runs,
 )
 
 FORGE_HINT = "No forge is connected. Run yard forge setup origin or yard forge setup github."
@@ -171,38 +173,36 @@ def _cmd_repo_new(args: argparse.Namespace) -> None:
 
 
 def _cmd_app_new(args: argparse.Namespace) -> None:
-    repo, ref = args.repo.strip(), args.ref.strip()
+    repo, ref, image, url = (str(value or "").strip() for value in (args.repo, args.ref, args.image, args.compose_url))
+    name = args.app.strip()
     try:
-        kind, runs = parse_runs(args.runs)
-        repo_less = kind in ("image", "url")
-        if repo_less and repo:
-            client.die(f"{runs} needs no repo; an app with a repo runs a file from it")
-        if not repo_less:
+        if sum(1 for value in (repo, image, url) if value) > 1:
+            client.die("an app has one source: pass one of --repo, --image, or --compose-url")
+        if image or url:
+            if ref or args.runs.strip():
+                client.die("--ref and --runs belong to a repo")
+            source = {"image": check_image(image)} if image else {"compose_url": check_compose_url(url)}
+            name = name or checkout.source_name(image, url)
+        else:
+            runs = check_runs(args.runs)
             if not repo or not ref:
                 _top, found_repo, found_ref = checkout.checkout()
                 repo = repo or found_repo
                 if not ref:
                     # The checkout branch counts only when the repo is the checkout's.
                     ref = found_ref if found_repo and repo.lower() == found_repo.lower() else ""
-            if kind == "path":
-                top = checkout.git_out("rev-parse", "--show-toplevel")
-                if top and not (Path(top) / runs).is_file():
-                    client.die(f"{runs} is not a file in this checkout. An image needs a tag: {runs}:TAG")
-    except YardError as exc:
-        client.fail(exc)
-    ref = ref or "main"
-    name = args.app.strip()
-    try:
-        if repo_less:
-            name = name or checkout.source_name(kind, runs)
-        else:
             if not repo:
                 client.die(
-                    "no repo; pass --repo https://<host>/<owner>/<name>, run inside a forge checkout,"
-                    " or run yard repo new first"
+                    "no source; pass --repo https://<host>/<owner>/<name>, --image NAME:TAG, or --compose-url URL,"
+                    " run inside a forge checkout, or run yard repo new first"
                 )
+            if runs and not runs.startswith("yard:"):
+                top = checkout.git_out("rev-parse", "--show-toplevel")
+                if top and not (Path(top) / runs).is_file():
+                    client.die(f"{runs} is not a file in this checkout")
+            repo, ref = check_repo(repo), ref or "main"
             name = name or checkout.default_name(repo, ref)
-            repo = check_repo(repo)
+            source = {"repo": repo, "ref": ref} | ({"runs": runs} if runs else {})
         check_app_name(name)
         hosts = [host.strip() for host in args.caddy]
         for host in hosts:
@@ -214,13 +214,9 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
 
     env = _new_app_env(args, name)
     session = client.load(args)
-    body: dict[str, object] = {"name": name, "repo": repo}
-    if not repo_less:
-        body["ref"] = ref
+    body: dict[str, object] = {"name": name, **source}
     if args.trigger:
         body["trigger"] = args.trigger
-    if runs:
-        body["runs"] = runs
     raw = client.api(session, "POST", "/api/v1/apps", body)
     if env:
         code, text = client.api_try(session, "PUT", f"/api/v1/apps/{quote(name)}/env", env)
@@ -257,7 +253,7 @@ def _cmd_app_new(args: argparse.Namespace) -> None:
             print(f"Caddy has no site for {name} yet. After a good deploy, run: yard caddy edit --app {name}")
         client.die(f"{name} was created, but the first deploy failed.")
     # A repo app listens on 8000 (the templates set it). An image or a URL app must expose one port.
-    _write_default_site(session, name, hosts, int(note.get("port") or 0) or (0 if repo_less else 8000))
+    _write_default_site(session, name, hosts, int(note.get("port") or 0) or (8000 if "repo" in source else 0))
 
 
 def _new_app_env(args: argparse.Namespace, name: str) -> dict[str, str]:
@@ -321,12 +317,12 @@ def _cmd_app_set(args: argparse.Namespace) -> None:
     session = client.load(args)
     name = checkout.app_name(session, args)
     patch: dict[str, str] = {}
-    for key in ("repo", "ref", "trigger", "runs"):
+    for key in ("repo", "ref", "runs", "image", "compose_url", "trigger"):
         value = str(getattr(args, key, "") or "").strip()
         if value:
             patch[key] = value
     if not patch:
-        client.die("yard app set needs --repo, --ref, --trigger, or --runs")
+        client.die("yard app set needs --repo, --ref, --runs, --image, --compose-url, or --trigger")
     page = client.object_of(client.api(session, "GET", "/api/v1/apps/" + quote(name), None))
     current = page.get("app") if isinstance(page, dict) else None
     current = current if isinstance(current, dict) else {}
@@ -337,14 +333,16 @@ def _cmd_app_set(args: argparse.Namespace) -> None:
     wrap = client.object_of(raw)
     found = wrap.get("app") if isinstance(wrap, dict) else None
     app = found if isinstance(found, dict) else {}
-    moved = any(key in patch and patch[key] != str(current.get(key) or "") for key in ("repo", "ref"))
+    moved = any(
+        key in patch and patch[key] != str(current.get(key) or "") for key in ("repo", "ref", "image", "compose_url")
+    )
     runs = str(app.get("runs") or "")
     changed = "runs" in patch and runs != str(current.get("runs") or "")
     # A check deploys a new repo, ref, or explicit runs. Back to auto changes nothing until the next commit.
     if (moved or (changed and runs)) and str(app.get("trigger") or "") == "push":
         print(f"Saved. The next check deploys it. Deploy now: yard app deploy --app {name}")
     elif moved:
-        print(f"Saved. {name} still runs the old repo and ref until the next deploy.")
+        print(f"Saved. {name} still runs the old source until the next deploy.")
         print(f"Deploy now: yard app deploy --app {name}")
     elif changed:
         print(f"Saved. {name} still runs the old way until the next deploy.")
@@ -477,8 +475,9 @@ def _cmd_app_deploy(args: argparse.Namespace) -> None:
     note = _follow_deploy(session, name)
     if client.out.json:
         return
-    if note.get("status") == "pending":
-        print("Yard restarts itself. Check: yard app status --app yard")
+    if not note:
+        # A deploy of Yard itself replaces the server that streams the log.
+        print(f"The log stream ended before the deploy did. Check: yard app status --app {name}")
         return
     _print_deploy_note(note, name)
     if note.get("status") == "failed":
@@ -834,19 +833,19 @@ def _app_parser(subs: argparse._SubParsersAction, common: argparse.ArgumentParse
         metavar="PATH",
         help=f"edit the settings in $EDITOR first, starting from PATH or {ENV_TEMPLATES[0]} in the checkout",
     )
-    new.add_argument(
-        "--runs", default="", help="auto, a path in the repo, yard:<template>, an image name:tag, or an https URL"
-    )
+    new.add_argument("--runs", default="", help="what the repo runs: auto, a path in the repo, or yard:<template>")
+    new.add_argument("--image", default="", help="run an image: name:tag or name@sha256:<digest>; no repo")
+    new.add_argument("--compose-url", default="", help="run a compose file fetched over https; no repo")
     _add_app_flag(new, "the app name; the repo and branch give a default")
     new.set_defaults(func=_cmd_app_new)
 
-    set_ = subs.add_parser("set", help="change the repo, ref, trigger, or runs", parents=[common])
+    set_ = subs.add_parser("set", help="change the source, ref, runs, or trigger", parents=[common])
     set_.add_argument("--repo", default="", help="the repo https URL")
     set_.add_argument("--ref", default="", help="the branch to follow")
     set_.add_argument("--trigger", default="", help="push or manual")
-    set_.add_argument(
-        "--runs", default="", help="auto, a path in the repo, yard:<template>, an image name:tag, or an https URL"
-    )
+    set_.add_argument("--runs", default="", help="what the repo runs: auto, a path in the repo, or yard:<template>")
+    set_.add_argument("--image", default="", help="run an image: name:tag or name@sha256:<digest>; no repo")
+    set_.add_argument("--compose-url", default="", help="run a compose file fetched over https; no repo")
     _add_app_flag(set_)
     set_.set_defaults(func=_cmd_app_set)
 

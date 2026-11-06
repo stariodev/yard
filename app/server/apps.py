@@ -1,86 +1,63 @@
 """The app records, the deploy, the checks, and prune. The yard record is ensured at boot."""
 
-import asyncio
 import hashlib
 import logging
 import secrets
 import shutil
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from app.server import compose, detect, git, journal, podman, sites, sources, status
-from app.server.detect import Plan
+from app.server.detect import STAMP, Plan
 from app.server.forges import Forge
+from app.server.status import Record
 from app.server.store import App, Config, Deployed
 from app.server.yard import Job, Tip, Yard
-from app.shared import YardError, app_container, atomic_write, clone_url, deploy_container, ensure_file, now, parse_runs
+from app.shared import YardError, app_container, atomic_write, clone_url, deploy_container, ensure_file, now
 
 log = logging.getLogger("yard")
 
 
 def ensure_host(yard: Yard) -> None:
     """The yard app record. Its compose runs the app and Caddy."""
-    config = yard.config
-    ensure_file(config.env("yard"))
+    ensure_file(yard.config.env("yard"))
     try:
         yard.store.app("yard")
     except YardError as exc:
-        if exc.code != "not_found":
+        if exc.status != 404:
             raise
-        yard.store.create_app("yard", "", "", "manual")
+        yard.store.create_app("yard", trigger="manual")
 
 
-def create(
-    yard: Yard,
-    name: str,
-    repo: str,
-    ref: str = "",
-    trigger: str = "",
-    runs: str = "",
-    *,
-    actor: str = "",
-) -> App:
-    app = yard.store.create_app(name, repo, ref, trigger, runs)
+def create(yard: Yard, name: str, *, actor: str = "", **source: str) -> App:
+    """A new app. `source` holds repo, ref, runs, image, compose_url, and trigger."""
+    app = yard.store.create_app(name, **source)
     ensure_file(yard.config.env(app.name))
-    journal.send(
-        yard.config,
-        "app.create",
-        f"app {app.name} created",
-        app=app.name,
-        repo=app.repo,
-        ref=app.ref,
-        trigger=app.trigger,
-        runs=app.runs,
-        actor=actor,
-    )
+    _journal_app(yard, "app.create", app, actor)
     return app
 
 
-def update(
-    yard: Yard,
-    name: str,
-    *,
-    repo: str | None = None,
-    ref: str | None = None,
-    trigger: str | None = None,
-    runs: str | None = None,
-    actor: str = "",
-) -> App:
-    app = yard.store.update_app(name, repo=repo, ref=ref, trigger=trigger, runs=runs)
+def update(yard: Yard, name: str, *, actor: str = "", **changes: str | None) -> App:
+    app = yard.store.update_app(name, **changes)
+    _journal_app(yard, "app.update", app, actor)
+    return app
+
+
+def _journal_app(yard: Yard, event: str, app: App, actor: str) -> None:
     journal.send(
         yard.config,
-        "app.update",
-        f"app {app.name} updated",
+        event,
+        f"app {app.name} {event.split('.')[1]}d",
         app=app.name,
         repo=app.repo,
         ref=app.ref,
-        trigger=app.trigger,
         runs=app.runs,
+        image=app.image,
+        compose_url=app.compose_url,
+        trigger=app.trigger,
         actor=actor,
     )
-    return app
 
 
 @dataclass(slots=True)
@@ -108,7 +85,7 @@ async def delete(yard: Yard, name: str, *, actor: str = "") -> Removed:
     project = compose.saved_project(yard.config, app, await status.get_plan(yard, app))
     if project is not None:
         try:
-            await compose.apply(yard.config, name, "purge", project)
+            await compose.run(yard.config, name, "purge", project)
         except Exception as exc:
             log.warning("purge %s: %s", name, exc)
 
@@ -120,14 +97,11 @@ async def delete(yard: Yard, name: str, *, actor: str = "") -> Removed:
     return removed
 
 
-@dataclass(slots=True)
-class Outcome:
-    status: str
-    image: str = ""
-    error: str = ""
-    previous: str = ""
-    # True when this deploy followed one that already ran: the revision it reports is that deploy's.
-    joined: bool = False
+# --- Deploy -------------------------------------------------------------------------------------
+#
+# A deploy runs one container, deploy-<name>. Yard prepares the plan (sync, detect, pull, fetch),
+# then starts the container detached, follows its log, and reads its exit code. The container's
+# labels and log are the only record. A running deploy container is the deploy lock.
 
 
 def start_deploy(yard: Yard, name: str, *, cause: str = "manual", actor: str = "") -> Job:
@@ -136,220 +110,158 @@ def start_deploy(yard: Yard, name: str, *, cause: str = "manual", actor: str = "
     if running is not None and running.status == "running":
         return running
     job = _new_job(yard, name, cause, actor)
-    yard.spawn(_finish(yard, job))
+    yard.spawn(_run(yard, job))
     return job
 
 
+async def deploy(yard: Yard, name: str, *, cause: str = "manual", actor: str = "") -> Record:
+    """Deploy what the source says now, and return the record of the deploy container."""
+    return await _run(yard, _new_job(yard, name, cause, actor))
+
+
 def _new_job(yard: Yard, name: str, cause: str, actor: str) -> Job:
-    """A new job. It replaces the app's job only when that one has ended; `_deploy_body` takes the slot
+    """A new job. It replaces the app's job only when that one has ended; `_run` takes the slot
     once it holds the lock, so a follower of the running deploy keeps its job."""
-    job = Job(
-        id=secrets.token_hex(4),
-        app=name,
-        cause=cause,
-        actor=actor,
-        started=now(),
-    )
+    job = Job(id=secrets.token_hex(4), app=name, cause=cause, actor=actor, started=now())
     running = yard.deploys.get(name)
     if running is None or running.status != "running":
         yard.deploys[name] = job
     return job
 
 
-async def deploy(yard: Yard, name: str, *, cause: str = "manual", actor: str = "") -> Outcome:
-    """One deploy path: resolve what the source says, then run compose up.
-
-    A repo deploys its ref tip; an image pins a digest; a URL fetches a compose
-    file. The deploy container's labels and exit code are the record: nothing is written after it.
-    """
-    return await _finish(yard, _new_job(yard, name, cause, actor))
-
-
-async def _finish(yard: Yard, job: Job) -> Outcome:
+async def _run(yard: Yard, job: Job) -> Record:
     try:
-        outcome = await _deploy_body(yard, job)
+        async with yard.lock(job.app):
+            yard.deploys[job.app] = job
+            record = await _deploy(yard, job)
     except Exception as exc:
-        outcome = Outcome("failed", error=str(exc))
         job.push(f"!! {exc}")
-    job.status = outcome.status
-    job.ended = now()
-    job.outcome = asdict(outcome)
-    job.changed.set()
-    return outcome
+        record = _memory_record(job, "failed", str(exc))
+    job.end(asdict(record))
+    return record
 
 
-async def _deploy_body(yard: Yard, job: Job) -> Outcome:
-    name = job.app
-    async with yard.lock(name):
-        yard.deploys[name] = job
-        try:
-            app = yard.store.app(name)
-        except YardError as exc:
-            job.push(f"!! {exc}")
-            return Outcome("failed", error=str(exc))
-        if yard.config.skip_deploy:
-            job.push("YARD_SKIP_DEPLOY is set. Deploy did not run.")
-            return Outcome("skipped")
-        listed = await status.list_containers(yard)
-        record = listed.get(deploy_container(app.name))
-        if record is not None and record.running:
-            return await _join(yard, job)
-        ready = Ready(revision="", before=status.running_plan(app, listed) or Deployed())
-        try:
-            if app.repo:
-                job.push(f"== sync {app.repo} {app.ref}")
-                ready = await _ready_repo(yard, app, job, ready)
-            else:
-                ready = await _ready_source(yard, app, job, ready)
-        except YardError as exc:
-            # The apply never ran. A failed deploy container still records this deploy.
-            job.push(f"!! {exc}")
-            outcome = Outcome("failed", ready.image, str(exc))
-            await compose.record_failure(yard.config, app.name, _labels(job, ready, outcome), job.lines)
-            return outcome
-        return await _apply(yard, app, job, ready)
-
-
-async def _join(yard: Yard, job: Job) -> Outcome:
-    """A running deploy container is the deploy lock, also after a Yard restart. Follow it to its end."""
-    job.push(f"== {deploy_container(job.app)} is running. This deploy follows it.")
-    await compose.follow(yard.config, job.app, job.push)
-    record = await status.last_deploy(yard, job.app)
-    if record is None or record.status == "running":
-        return Outcome("failed", error=f"lost {deploy_container(job.app)} while it ran", joined=True)
-    return Outcome(record.status, record.image, record.error, record.previous, joined=True)
-
-
-@dataclass(slots=True)
-class Ready:
-    """What a deploy applies. Each source fills it; `_apply` runs it the same way."""
-
-    revision: str
-    # What runs before this deploy. The labels keep it, so a failed deploy still names the running plan.
-    before: Deployed = field(default_factory=Deployed)
-    image: str = ""
-    project: compose.Project | None = None
-    deployed: Deployed | None = None
-    # A URL compose app reverts to its previous file, not to an image.
-    revert_image: bool = True
-
-
-async def _ready_repo(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
-    """Sync the clone to the ref tip and resolve the plan."""
-    forge = yard.forge(app.repo)
-    forge.require_connected()
-    config = yard.config
-    checkout = config.clone(app.name)
-    token = await forge.token(app.repo)
-    ready.revision = await git.sync(checkout, clone_url(app.repo), app.ref, token)
-    # Label the tried pair before the plan can fail, or the check loop retries every round.
-    ready.deployed = Deployed(revision=ready.revision, template=_template_at(checkout, app))
-    plan = _plan(yard, app, ready.before)
-    ready.deployed = Deployed(
-        revision=ready.revision, runs=plan.answer, kind=plan.kind, reason=plan.reason, template=plan.template
-    )
+async def _deploy(yard: Yard, job: Job) -> Record:
+    config, name = yard.config, job.app
+    app = yard.store.app(name)
+    if config.skip_deploy:
+        job.push("YARD_SKIP_DEPLOY is set. Deploy did not run.")
+        return _memory_record(job, "skipped")
+    listed = await status.list_containers(yard)
+    running = listed.get(deploy_container(name))
+    if running is not None and running.running:
+        job.push(f"== {deploy_container(name)} is running. This deploy follows it.")
+        await compose.follow(config, name, job.push)
+        await compose.wait(config, name)
+        # The deploy it followed may run an older revision: check again.
+        want(yard, [name])
+        return await _read_record(yard, job)
+    before = status.running_plan(app, listed) or Deployed()
+    target = Deployed()
     try:
-        project = compose.project(config, app, ready.deployed)
+        project = await _prepare(yard, app, job, before, target)
+    except YardError as exc:
+        # The apply never runs. The deploy container still records this deploy: its log is the lines above.
+        job.push(f"!! {exc}")
+        try:
+            await compose.run(config, name, "fail", None, labels=_labels(job, target, before, str(exc)), log=job.lines)
+        except YardError as failed:
+            log.warning("deploy record %s: %s", name, failed.message)
+            return _memory_record(job, "failed", str(exc))
+        return await _read_record(yard, job)
+    labels = _labels(job, target, before)
+    await compose.run(config, name, "up", project, labels=labels, log=job.lines, on_line=job.push)
+    return await _read_record(yard, job)
+
+
+async def _prepare(yard: Yard, app: App, job: Job, before: Deployed, target: Deployed) -> compose.Project:
+    """Resolve the source into `target` and build the project. `target` keeps what is known when this fails,
+    so the check loop does not try the same revision again."""
+    config = yard.config
+    if app.repo:
+        job.push(f"== sync {app.repo} {app.ref}")
+        forge = yard.forge(app.repo)
+        forge.require_connected()
+        target.revision = await git.sync(
+            config.clone(app.name), clone_url(app.repo), app.ref, await forge.token(app.repo)
+        )
+        target.runs = app.runs
+        target.template = STAMP if app.runs.startswith("yard:") else ""
+        plan = _plan(yard, app, before)
+        target.runs, target.kind, target.reason, target.template = plan.answer, plan.kind, plan.reason, plan.template
+        job.push(f"== runs {plan.answer} ({plan.kind}" + (f"; {plan.reason}" if plan.reason else "") + ")")
+    elif app.image:
+        job.push(f"== pull {app.image}")
+        target.revision, target.kind = await sources.digest(app.image), "image"
+    elif app.compose_url:
+        job.push(f"== fetch {app.compose_url}")
+        body = await sources.fetch_file(app.compose_url)
+        target.revision, target.kind = "sha256:" + hashlib.sha256(body).hexdigest(), "compose"
+        _save_compose_copy(config, app, body, target.revision, before.revision)
+    else:
+        raise YardError(
+            400,
+            "no_source",
+            f"app {app.name} has no source",
+            help_text="Set one: yard app set --repo URL, --image NAME:TAG, or --compose-url URL",
+        )
+    target.image = compose.plan_image(app, target.revision, target.template)
+    try:
+        project = compose.project(config, app, target)
     except OSError as exc:
         raise YardError(502, "compose", str(exc)) from exc
-    ready.image = project.image
-    job.push(f"== runs {plan.answer} ({plan.kind}" + (f"; {plan.reason}" if plan.reason else "") + ")")
-    # A deploy of a sha whose image is still local skips the build.
-    if await _image_exists(yard, ready.image):
+    # Only a repo app builds, and a sha whose image is still local skips the build.
+    if not app.repo or await _image_exists(yard, target.image):
         project.env["SKIP_BUILD"] = "1"
-    ready.project = project
-    return ready
-
-
-async def _ready_source(yard: Yard, app: App, job: Job, ready: Ready) -> Ready:
-    """A repo-less app: pin an image by digest, or fetch a compose file over https."""
-    config = yard.config
-    kind, _value = parse_runs(app.runs)
-    if kind not in ("image", "url"):
-        job.push("Set the repo: yard app set --repo https://<host>/<owner>/<name>")
-        raise YardError(400, "no_repo", f"app {app.name} has no repo")
-    job.push(f"== pull {app.runs}" if kind == "image" else f"== fetch {app.runs}")
-    previous_copy = None
-    if kind == "image":
-        ready.revision = await sources.digest(app.runs)
-        ready.deployed = Deployed(revision=ready.revision, runs=app.runs, kind="image")
-        ready.image = compose.plan_image(app, ready.deployed)
-    else:
-        body = await sources.fetch_file(app.runs)
-        ready.revision = "sha256:" + hashlib.sha256(body).hexdigest()
-        ready.deployed = Deployed(revision=ready.revision, runs=app.runs, kind="compose")
-        ready.image = compose.plan_image(app, ready.deployed)
-        text = body.decode("utf-8", "replace")
-        if detect.classify(text) != "compose":
-            raise YardError(502, "detect", "a Containerfile needs a repo to build; a URL can name a compose file")
-        if detect.BUILD_LINE.search(text):
-            raise YardError(
-                502,
-                "detect",
-                "a compose file from a URL cannot build: there is no checkout",
-                help_text="Build the image elsewhere, or give the app a repo.",
-            )
-        ready.revert_image = False
-        if ready.before.revision:
-            previous_copy = config.compose_copy(app.name, ready.before.revision)
-        copy = config.compose_copy(app.name, ready.revision)
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(copy, text)
-        # The running copy and the new one stay: the revert needs the running one.
-        for path in copy.parent.glob("*.yml"):
-            if path not in (copy, previous_copy):
-                path.unlink()
-    project = compose.project(config, app, ready.deployed)
-    project.env["SKIP_BUILD"] = "1"
+    # A failed `up --wait` puts the previous project back up.
+    previous_copy = config.compose_copy(app.name, before.revision) if app.compose_url and before.revision else None
     if previous_copy is not None and previous_copy.is_file():
         project.env["PREVIOUS_COMPOSE_FILE"] = str(previous_copy)
-    ready.project = project
-    return ready
+    elif not app.compose_url and before.image and before.image != target.image:
+        project.env["PREVIOUS_IMAGE"] = before.image
+    return project
 
 
-async def _apply(yard: Yard, app: App, job: Job, ready: Ready) -> Outcome:
-    """One apply container runs compose up. That container is the record of this deploy."""
-    config = yard.config
-    assert ready.project is not None and ready.deployed is not None
-    project = ready.project
-    # A failed `up --wait` reverts to the running image.
-    previous = await _running_image(yard, app.name)
-    if ready.revert_image and previous and previous != ready.image:
-        project.env["PREVIOUS_IMAGE"] = previous
-    labels = _labels(job, ready, Outcome("running", ready.image, previous=previous))
-    # Upgrading yard replaces this process, so that apply run is detached.
-    detach = app.name == "yard"
-    code, _text = await compose.apply(config, app.name, "up", project, labels=labels, detach=detach, on_line=job.push)
-    if detach:
-        return Outcome("pending", ready.image, previous=previous)
-    return Outcome(status.deploy_status(code), ready.image, status.deploy_error(code, previous), previous)
+def _save_compose_copy(config: Config, app: App, body: bytes, revision: str, before: str) -> None:
+    """Check a fetched compose file and keep it. The copy that runs now stays too: a revert needs it."""
+    text = body.decode("utf-8", "replace")
+    if detect.classify(text) != "compose":
+        raise YardError(502, "detect", "a Containerfile needs a repo to build; a URL can name a compose file")
+    if detect.BUILD_LINE.search(text):
+        raise YardError(
+            502,
+            "detect",
+            "a compose file from a URL cannot build: there is no checkout",
+            help_text="Build the image elsewhere, or give the app a repo.",
+        )
+    copy = config.compose_copy(app.name, revision)
+    atomic_write(copy, text)
+    keep = {copy, config.compose_copy(app.name, before)} if before else {copy}
+    for path in copy.parent.glob("*.yml"):
+        if path not in keep:
+            path.unlink()
 
 
-def _labels(job: Job, ready: Ready, outcome: Outcome) -> dict[str, str]:
+def _labels(job: Job, target: Deployed, before: Deployed, error: str = "") -> dict[str, str]:
     """The deploy container's labels: the whole record, set when the container is created.
 
     `status.running_plan` reads the new plan on exit 0 and the `before.` plan otherwise.
     """
-    plan = ready.deployed or Deployed()
-    before = ready.before
-    labels = {
-        "sha": ready.revision,
-        "image": ready.image,
-        "runs": plan.runs,
-        "kind": plan.kind,
-        "reason": plan.reason,
-        "template": plan.template,
-        "before.revision": before.revision,
-        "before.runs": before.runs,
-        "before.kind": before.kind,
-        "before.reason": before.reason,
-        "before.template": before.template,
-        "cause": job.cause,
-        "actor": job.actor,
-        "previous": outcome.previous,
-        "error": (outcome.error.splitlines() or [""])[0],
-    }
+    labels = {"cause": job.cause, "actor": job.actor, "error": (error.splitlines() or [""])[0]}
+    for item in fields(Deployed):
+        labels[item.name] = getattr(target, item.name)
+        labels[f"before.{item.name}"] = getattr(before, item.name)
     return {key: value for key, value in labels.items() if value}
+
+
+async def _read_record(yard: Yard, job: Job) -> Record:
+    found = status.deploy_record(await status.list_containers(yard), job.app)
+    return found or _memory_record(job, "failed", f"lost {deploy_container(job.app)} while it ran")
+
+
+def _memory_record(job: Job, outcome: str, error: str = "") -> Record:
+    """The record of a deploy that left no deploy container."""
+    return Record(job.app, "", "", outcome, job.cause, job.actor, "", error, job.started, now())
 
 
 async def exposed_port(yard: Yard, name: str) -> int:
@@ -362,97 +274,63 @@ async def exposed_port(yard: Yard, name: str) -> int:
 
 def _plan(yard: Yard, app: App, previous: Deployed) -> Plan:
     """What the app runs at this commit: the record's runs, or the auto resolve."""
-    clone = yard.config.clone(app.name)
-    plan = detect.plan_for(clone, app.name, app.runs)
-    if not app.runs:
-        # The auto guard: a silent change of kind asks for a pin instead.
-        if previous.runs and _key(previous.runs) != _key(plan.answer):
-            raise YardError(
-                502,
-                "detect",
-                f"auto found {plan.answer} ({plan.kind}); the last deploy ran {previous.runs} ({previous.kind})",
-                help_text=f"Pin one: yard app set --runs {plan.answer}   or   yard app set --runs {previous.runs}",
-            )
+    plan = detect.plan_for(yard.config.clone(app.name), app.name, app.runs)
+    # The auto guard: a silent change of answer asks for a pin instead. All templates count as one answer.
+    if not app.runs and previous.runs and _answer(previous.runs) != _answer(plan.answer):
+        raise YardError(
+            502,
+            "detect",
+            f"auto found {plan.answer} ({plan.kind}); the last deploy ran {previous.runs} ({previous.kind})",
+            help_text=f"Pin one: yard app set --runs {plan.answer}   or   yard app set --runs {previous.runs}",
+        )
     if plan.generated:
         atomic_write(yard.config.app_dir(app.name) / "Containerfile", plan.generated)
     return plan
 
 
-def _key(answer: str) -> str:
-    """The auto-guard key: all templates are one answer; a path change is a new answer."""
-    return "template" if answer.startswith("yard:") else answer
+def _answer(runs: str) -> str:
+    return "template" if runs.startswith("yard:") else runs
 
 
 def app_file(config: Config, app: App, deployed: Deployed | None, which: str) -> str:
-    """The file a `yard app cat` prints, from the running plan."""
-    deploy = "The app answers after the first deploy: yard app deploy --app " + app.name
+    """The file a `yard app cat` prints: the compose files or the Containerfile of the running project."""
+    if which not in ("compose", "containerfile"):
+        raise YardError(404, "no_file", f"no file {which}", help_text="The files are compose and containerfile.")
+    if deployed is None:
+        raise YardError(
+            404,
+            "no_file",
+            f"{app.name} has no {which} yet",
+            help_text=f"The app answers after the first deploy: yard app deploy --app {app.name}",
+        )
+    project = compose.project(config, app, deployed)
     if which == "compose":
-        if deployed is None:
-            raise YardError(404, "no_file", f"{app.name} has no compose file yet", help_text=deploy)
-        if deployed.kind == "compose":
-            if deployed.runs.startswith("https://"):
-                path = config.compose_copy(app.name, deployed.revision)
-                if path.is_file():
-                    return path.read_text()
-                raise YardError(404, "no_file", f"{app.name}'s compose copy is missing", help_text=deploy)
-            return _clone_file(config.clone(app.name), deployed.runs, app.name)
-        return _yard_files(deployed.kind)
-    if which == "containerfile":
-        if deployed is None:
-            raise YardError(404, "no_file", f"{app.name} has no Containerfile yet", help_text=deploy)
-        if deployed.kind == "containerfile":
-            if deployed.runs.startswith("yard:"):
-                path = config.app_dir(app.name) / "Containerfile"
-                if path.is_file():
-                    return path.read_text()
-                raise YardError(
-                    404,
-                    "no_file",
-                    f"{app.name}'s Containerfile is missing",
-                    help_text="Deploy again: yard app deploy --app " + app.name,
-                )
-            return _clone_file(config.clone(app.name), deployed.runs, app.name)
-        if deployed.kind == "image":
+        paths = [Path(path) for path in project.files]
+    else:
+        if "DOCKERFILE" not in project.env:
             raise YardError(
                 404,
                 "no_file",
-                f"{app.name} runs an image; there is no Containerfile",
-                help_text="yard app cat compose",
+                f"{app.name} builds no image from a Containerfile that Yard knows",
+                help_text=f"yard app cat compose --app {app.name}",
             )
+        paths = [Path(project.env["CHECKOUT"]) / project.env["DOCKERFILE"]]
+    clone = config.clone(app.name).resolve()
+    for path in paths:
+        # A file of the clone stays in it: a committed symlink must not print a host file.
+        if path.is_relative_to(config.clone(app.name)) and not path.resolve().is_relative_to(clone):
+            raise YardError(404, "no_file", f"{path.name} of {app.name} points outside the clone")
+    missing = [path for path in paths if not path.is_file()]
+    if missing:
         raise YardError(
             404,
             "no_file",
-            f"{app.name} runs its own compose file; that file names its build",
-            help_text="yard app cat compose",
+            f"{missing[0].name} of {app.name} is missing",
+            help_text=f"Deploy again: yard app deploy --app {app.name}",
         )
-    raise YardError(404, "no_file", f"no file {which}", help_text="The files are compose and containerfile.")
-
-
-def _yard_files(kind: str) -> str:
-    """Yard's own compose files, each preceded by its name."""
-    names = ["app.compose.yml"] + (["build.compose.yml"] if kind == "containerfile" else [])
-    parts = []
-    for name in names:
-        path = Path(compose.APPLY_DIR) / name
-        if not path.is_file():
-            raise YardError(502, "no_file", f"Yard's {name} is missing on this host")
-        parts.append(f"# {name}\n{path.read_text()}")
-    return "\n".join(parts)
-
-
-def _clone_file(clone: Path, rel: str, name: str) -> str:
-    root = clone.resolve()
-    path = (root / rel).resolve()
-    if path.parent != root and root not in path.parents:
-        raise YardError(404, "no_file", f"{rel} is outside the clone")
-    if not path.is_file():
-        raise YardError(
-            404,
-            "no_file",
-            f"{rel} is not in {name}'s clone",
-            help_text=f"The clone is the deployed commit: yard app deploy --app {name}",
-        )
-    return path.read_text()
+    if len(paths) == 1:
+        return paths[0].read_text()
+    return "\n".join(f"# {path.name}\n{path.read_text()}" for path in paths)
 
 
 async def _image_exists(yard: Yard, image: str) -> bool:
@@ -464,192 +342,102 @@ async def _image_exists(yard: Yard, image: str) -> bool:
     return True
 
 
-async def _running_image(yard: Yard, name: str) -> str:
-    """The image behind the running app container; empty when there is none."""
+# --- Checks -------------------------------------------------------------------------------------
+#
+# One worker checks the apps. The timer asks for every app; a webhook asks for the apps of one repo.
+# Each app has at most one check at a time, and a request during that check runs once after it.
+
+
+def want(yard: Yard, names: list[str], cause: str = "check", actor: str = "check") -> None:
+    """Ask the worker to check these apps."""
+    for name in names:
+        yard.wanted[name] = (cause, actor)
+    yard.wake.set()
+
+
+async def loop(yard: Yard) -> None:
+    """The check worker."""
+    due = time.monotonic() + yard.config.check_seconds
+    while await yard.pause(max(0.0, due - time.monotonic()), yard.wake):
+        yard.wake.clear()
+        try:
+            if time.monotonic() >= due:
+                due = time.monotonic() + yard.config.check_seconds
+                for app in yard.store.list_apps():
+                    yard.wanted.setdefault(app.name, ("check", "check"))
+            for name in [name for name in yard.wanted if name not in yard.checking]:
+                cause, actor = yard.wanted.pop(name)
+                yard.checking[name] = yard.spawn(_check_one(yard, name, cause, actor))
+        except Exception as exc:
+            log.warning("check: %s", exc)
+
+
+async def _check_one(yard: Yard, name: str, cause: str, actor: str) -> None:
     try:
-        listed = podman.parse_ps(await yard.podman.run("ps", "--format", "json"))
-    except YardError:
-        return ""
-    item = listed.get(app_container(name))
-    return item.image if item and item.running else ""
-
-
-_DEBOUNCE = 10.0
-
-
-async def check_all(yard: Yard) -> None:
-    """Poll every app: repo tips per forge, image and URL apps per app.
-
-    One `podman ps` serves the round. The apps check side by side, so one slow deploy does not hold
-    the others back; each app's deploys still run one at a time on its lock.
-    """
-    try:
-        listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
-    except YardError:
-        # Each check still reads its tip, then tries `podman ps` itself and stops there.
-        listed = None
-    fetched: dict[str, asyncio.Future[bytes]] = {}
-    await asyncio.gather(
-        *(_check_forge(yard, forge, listed) for forge in yard.forges.values()),
-        *(
-            _check(yard, app, listed, fetched=fetched, cause="check", actor="check")
-            for app in yard.store.list_apps()
-            if not app.repo
-        ),
-    )
-
-
-async def _check(
-    yard: Yard,
-    app: App,
-    listed: dict[str, podman.Container] | None = None,
-    *,
-    token: str = "",
-    fetched: dict[str, asyncio.Future[bytes]] | None = None,
-    cause: str,
-    actor: str,
-) -> None:
-    """The newest (revision, template) for one app. A moved pair deploys once.
-
-    `listed` is the round's `podman ps`; without it the check runs its own. `fetched` shares one
-    download per compose URL between the apps of a round.
-    """
-    try:
-        if app.repo:
-            clone = yard.config.clone(app.name)
-            tip = await git.remote_tip(clone, clone_url(app.repo), app.ref, token)
-            template = _template_at(clone, app)
-            current = (tip, template)
-        elif parse_runs(app.runs)[0] == "image":
-            current = (await sources.digest(app.runs), "")
-        else:
-            fetched = {} if fetched is None else fetched
-            if app.runs not in fetched:
-                fetched[app.runs] = asyncio.ensure_future(sources.fetch_file(app.runs))
-            body = await fetched[app.runs]
-            current = ("sha256:" + hashlib.sha256(body).hexdigest(), "")
+        await check(yard, name, cause=cause, actor=actor)
     except Exception as exc:
-        tip = yard.tips.setdefault(app.name, Tip())
-        tip.error = exc.message if isinstance(exc, YardError) else str(exc)
-        log.warning("%s source: %s", app.name, tip.error)
+        log.warning("%s check: %s", name, exc)
+    finally:
+        yard.checking.pop(name, None)
+        if name in yard.wanted:
+            yard.wake.set()
+
+
+async def check(yard: Yard, name: str, *, cause: str = "check", actor: str = "check") -> None:
+    """Read the source revision. A push app whose revision moved deploys once."""
+    try:
+        app = yard.store.app(name)
+    except YardError:
         return
-    tip = yard.tips.setdefault(app.name, Tip())
-    tip.error = ""
-    tip.revision, tip.template = current
-    # An explicit runs is part of what runs: a new one deploys once. Auto follows the commit, so it adds nothing.
-    current = (current[0], current[1], app.runs)
+    tip = yard.tips.setdefault(name, Tip())
+    try:
+        tip.revision, tip.error = await _revision(yard, app), ""
+    except Exception as exc:
+        tip.error = exc.message if isinstance(exc, YardError) else str(exc)
+        log.warning("%s source: %s", name, tip.error)
+        return
     if app.trigger != "push":
         return
-    if listed is None:
-        try:
-            listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
-        except YardError as exc:
-            log.warning("%s check: %s", app.name, exc)
-            return
-    deployed = status.running_plan(app, listed) or Deployed()
-    tried, tried_template, tried_runs = status.last_try(listed, app.name)
+    listed = podman.parse_ps(await yard.podman.run("ps", "-a", "--format", "json"))
+    moved = _moved(app, status.running_plan(app, listed), tip.revision)
     # The last try is on the deploy container too, so a restart does not retry a failed plan.
-    if current in (
-        (deployed.revision, deployed.template, deployed.runs if app.runs else ""),
-        (tried, tried_template, tried_runs if app.runs else ""),
-    ):
+    if not moved or not _moved(app, status.tried_plan(listed, name), tip.revision):
         return
-    moved = _moved(app, deployed, current)
-    journal.send(
-        yard.config,
-        "check.moved",
-        f"{app.name} {moved} moved",
-        app=app.name,
-        head=deployed.revision,
-        tip=current[0],
-        template=current[1],
-    )
-    outcome = await deploy(yard, app.name, cause=cause, actor=actor)
-    if outcome.joined:
-        # Another deploy held the lock. It has ended: check again, so the newest revision still deploys.
-        try:
-            app = yard.store.app(app.name)
-        except YardError:
-            return
-        await _check(yard, app, token=token, cause=cause, actor=actor)
+    journal.send(yard.config, "check.moved", f"{name} {moved} moved", app=name, tip=tip.revision)
+    await deploy(yard, name, cause=cause, actor=actor)
 
 
-def _template_at(clone: Path, app: App) -> str:
-    """The template stamp a deploy of the clone would write; "" for non-template answers."""
-    if app.runs and not app.runs.startswith("yard:"):
-        return ""
-    try:
-        return detect.plan_for(clone, app.name, app.runs).template
-    except YardError:
-        return ""
+async def _revision(yard: Yard, app: App) -> str:
+    """The newest revision of the source: a commit, an image digest, or the sha256 of a compose file."""
+    if app.repo:
+        forge = yard.forge(app.repo)
+        forge.require_connected()
+        token = await forge.token(app.repo)
+        tip = await git.remote_tip(yard.config.clone(app.name), clone_url(app.repo), app.ref, token)
+        forge.last_check = now()
+        return tip
+    if app.image:
+        return await sources.digest(app.image)
+    if app.compose_url:
+        return "sha256:" + hashlib.sha256(await sources.fetch_file(app.compose_url)).hexdigest()
+    raise YardError(400, "no_source", f"app {app.name} has no source")
 
 
-def _moved(app: App, deployed: Deployed, current: tuple[str, str, str]) -> str:
-    """What the check saw move: commit, template, image, file, or runs."""
-    parts = []
-    if current[0] != deployed.revision:
-        if not app.repo:
-            parts.append("file" if parse_runs(app.runs)[0] == "url" else "image")
-        else:
-            parts.append("commit")
-    if current[1] != deployed.template:
-        parts.append("template")
-    if current[2] and current[2] != deployed.runs:
-        parts.append("runs")
-    return " and ".join(parts) or "revision"
+def _moved(app: App, plan: Deployed | None, revision: str) -> str:
+    """What moved since the plan: commit, image, file, runs, or template. "" when nothing did."""
+    if plan is None or plan.revision != revision:
+        return "commit" if app.repo else "image" if app.image else "file"
+    if app.runs and plan.runs != app.runs:
+        return "runs"
+    if status.template_moved(plan):
+        return "template"
+    return ""
 
 
-async def _check_forge(yard: Yard, forge: Forge, listed: dict[str, podman.Container] | None) -> None:
-    """The push apps on one forge. The tokens come first, one at a time, so each installation mints once."""
-    if not forge.connected():
-        return
-    prefix = f"https://{forge.host}/"
-    checks = []
-    for app in yard.store.list_apps():
-        if app.trigger != "push" or not app.repo.lower().startswith(prefix):
-            continue
-        try:
-            token = await forge.token(app.repo)
-        except YardError as exc:
-            log.warning("%s token: %s", forge.name, exc)
-            continue
-        checks.append(_check(yard, app, listed, token=token, cause="check", actor="check"))
-    await asyncio.gather(*checks)
-    forge.last_check = now()
-
-
-async def check_repo(yard: Yard, repo: str) -> None:
-    """The webhook path: check the apps on one repo. The first push runs now."""
-    key = repo.lower()
-    if _debounce(yard, key, lambda: _check_repo(yard, repo)):
-        await _check_repo(yard, repo)
-
-
-async def check_installation(yard: Yard, forge: Forge) -> None:
-    """An installation event refreshes the saved installation. The push debounce applies."""
-    if _debounce(yard, f"installation:{forge.host}", lambda: refresh_installations(yard, forge)):
-        await refresh_installations(yard, forge)
-
-
-def _debounce(yard: Yard, key: str, run: Callable[[], Awaitable[object]]) -> bool:
-    """Leading plus trailing. True runs now; false queues one run at the end of the window."""
-    if time.monotonic() - yard.checked.get(key, -_DEBOUNCE) < _DEBOUNCE:
-        if key not in yard.queued:
-            yard.queued[key] = run
-            yard.spawn(_trailing(yard, key))
-        return False
-    yard.checked[key] = time.monotonic()
-    return True
-
-
-async def _trailing(yard: Yard, key: str) -> None:
-    if not await yard.pause(max(0.0, _DEBOUNCE - (time.monotonic() - yard.checked[key]))):
-        # Shutdown drops the queued check; the timer check after the next boot finds the ref.
-        yard.queued.pop(key, None)
-        return
-    run = yard.queued.pop(key)
-    yard.checked[key] = time.monotonic()
-    await run()
+def check_repo(yard: Yard, repo: str, actor: str) -> None:
+    """The webhook path: ask for a check of the push apps on one repo."""
+    names = [app.name for app in yard.store.list_apps() if app.repo.lower() == repo.lower() and app.trigger == "push"]
+    want(yard, names, "push", actor)
 
 
 async def refresh_installations(yard: Yard, forge: Forge) -> str:
@@ -669,32 +457,6 @@ async def refresh_installations(yard: Yard, forge: Forge) -> str:
             installations=",".join(str(entry.get("id") or "") for entry in installations),
         )
     return ""
-
-
-async def _check_repo(yard: Yard, repo: str) -> None:
-    try:
-        forge = yard.forge(repo)
-    except YardError:
-        return
-    if not forge.connected():
-        return
-    try:
-        token = await forge.token(repo)
-    except YardError as exc:
-        log.warning("%s token: %s", forge.name, exc)
-        return
-    for app in yard.store.list_apps():
-        if app.repo.lower() == repo.lower() and app.trigger == "push":
-            await _check(yard, app, token=token, cause="push", actor=f"webhook:{forge.name}")
-
-
-async def loop(yard: Yard) -> None:
-    """One loop that asks the forges for the watched refs on a timer."""
-    while await yard.pause(yard.config.check_seconds):
-        try:
-            await check_all(yard)
-        except Exception as exc:
-            log.warning("check: %s", exc)
 
 
 async def prune_loop(yard: Yard) -> None:

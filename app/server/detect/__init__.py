@@ -21,12 +21,12 @@ from pathlib import Path
 from app.server import git
 from app.server.compose import COMPOSE_NAMES, DOCKERFILES
 from app.server.detect import go, http_nu, node, python, stario
-from app.server.detect.base import Plan, Repo, _join
+from app.server.detect.base import STAMP, Plan, Repo, _join
 from app.shared import YardError
 
 DETECTORS = (stario, python, go, node, http_nu)
 
-__all__ = ["DETECTORS", "Plan", "Repo", "classify", "language", "plan_for", "resolve"]
+__all__ = ["DETECTORS", "STAMP", "Plan", "Repo", "classify", "language", "plan_for", "resolve"]
 
 _SERVICES = re.compile(r"^services:\s*(#.*)?$", re.M)
 _INSTRUCTION = re.compile(r"^(FROM|ARG)\s", re.I)

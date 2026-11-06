@@ -265,8 +265,8 @@ def test_format_apps_repoless_shows_source(tmp_path):
     from app.cli.render import format_apps
 
     rows = [
-        {"name": "db", "repo": "", "ref": "main", "trigger": "push", "runs": "postgres:17"},
-        {"name": "umami", "repo": "", "ref": "main", "trigger": "push", "runs": "https://x.example/umami.yml"},
+        {"name": "db", "repo": "", "trigger": "push", "image": "postgres:17"},
+        {"name": "umami", "repo": "", "trigger": "push", "compose_url": "https://x.example/umami.yml"},
         {"name": "heldso", "repo": "https://github.com/org/heldso", "ref": "main", "trigger": "push"},
     ]
     out = format_apps(rows)

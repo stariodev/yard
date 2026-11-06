@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from app.server.forges import Forge, GitHub, Origin
+from app.server.forges import Forge, ForgeError, GitHub, Origin
 from app.shared import YardError, clone_url
 
 
@@ -204,7 +204,7 @@ async def test_a_bad_status_is_a_yard_error(api):
         await origin._call("GET", "/missing", "bearer")
     assert caught.value.status == 502
     assert caught.value.code == "origin"
-    assert caught.value.context["status"] == 404
+    assert isinstance(caught.value, ForgeError) and caught.value.upstream == 404
 
 
 async def test_origin_connect_saves_after_the_check(api, tmp_path):

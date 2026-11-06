@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from app.server.podman import Podman
 from app.server.store import App, Deployed
-from app.shared import deploy_container, ensure_file, short_sha
+from app.shared import YardError, deploy_container, ensure_file, short_sha
 
 if TYPE_CHECKING:
     from app.server.store import Config
@@ -39,14 +39,13 @@ class Project:
     image: str = ""
 
 
-def plan_image(app: App, plan: Deployed) -> str:
-    """The image a plan runs: a local tag for a repo app, the pinned digest for an image app,
-    and a compose:<12 hex> name for a compose file from a URL."""
+def plan_image(app: App, revision: str, template: str = "") -> str:
+    """The image a deploy runs: a local tag for a repo app, the digest for an image app, none for a URL app."""
     if app.repo:
-        return image_tag(app.name, plan.revision, plan.template)
-    if plan.kind == "image":
-        return f"{plan.runs.split('@', 1)[0]}@{plan.revision}"
-    return f"compose:{plan.revision[7:19]}"
+        return image_tag(app.name, revision, template)
+    if app.image:
+        return f"{app.image.split('@', 1)[0]}@{revision}"
+    return ""
 
 
 def run_env(config: Config, app: App, checkout: Path, image: str, sha: str) -> dict[str, str]:
@@ -77,8 +76,7 @@ def project(config: Config, app: App, plan: Deployed) -> Project:
     only; "compose" runs the file itself: the clone path or the fetched copy.
     """
     checkout = config.clone(app.name) if app.repo else config.app_dir(app.name)
-    image = plan_image(app, plan)
-    env = run_env(config, app, checkout, image, plan.revision)
+    env = run_env(config, app, checkout, plan.image, plan.revision)
     ensure_file(config.env(app.name))
     if plan.kind == "containerfile":
         files = [APP_COMPOSE, BUILD_COMPOSE]
@@ -93,7 +91,7 @@ def project(config: Config, app: App, plan: Deployed) -> Project:
         files = [str(config.compose_copy(app.name, plan.revision))]
     else:
         files = [str(checkout / plan.runs)]
-    return Project(app.name, files, env, image)
+    return Project(app.name, files, env, plan.image)
 
 
 def saved_project(config: Config, app: App, plan: Deployed | None) -> Project | None:
@@ -107,82 +105,67 @@ def saved_project(config: Config, app: App, plan: Deployed | None) -> Project | 
     return project(config, app, plan)
 
 
-async def apply(
+async def run(
     config: Config,
     app: str,
     command: str,
-    project: Project,
+    project: Project | None,
     *,
     labels: dict[str, str] | None = None,
-    detach: bool = False,
+    log: list[str] | None = None,
     on_line: Callable[[str], None] | None = None,
-) -> tuple[int, str]:
-    """Run the apply script as one Podman container. A non-zero exit is the deploy log, not an exception."""
-    await _remove_record(config, app)
-    argv = [
-        "run",
-        *_record_args(app, labels or {}),
-        "--network",
-        "yard",
-        "-v",
-        f"{config.podman_socket}:/run/podman/podman.sock",
-        "-v",
-        f"{config.root}:{config.root}",
-        "-e",
-        f"COMPOSE_PROJECT_NAME={app}",
-        "-e",
-        f"COMPOSE_FILE={':'.join(project.files)}",
-    ]
-    for key in sorted(project.env):
-        argv += ["-e", f"{key}={project.env[key]}"]
-    if detach:
-        argv.append("-d")
-    argv += ["localhost/yard-apply", command]
-    return await _podman(config).stream(*argv, on_line=on_line)
+) -> int:
+    """Start the deploy container, follow its log, and return its exit code."""
+    skip = await start(config, app, command, project, labels=labels or {}, log=log or [])
+    await follow(config, app, on_line or (lambda _line: None), skip=skip)
+    return await wait(config, app)
 
 
-async def record_failure(config: Config, app: str, labels: dict[str, str], lines: list[str]) -> None:
-    """A deploy that failed before the apply: a deploy container that prints its lines and exits 1."""
-    try:
-        await _remove_record(config, app)
-    except Exception as exc:
-        log.warning("deploy record %s: %s", app, exc)
-        return
-    argv = [
-        "run",
-        *_record_args(app, labels),
-        "--entrypoint",
-        "sh",
-        "-e",
-        "YARD_LOG=" + "\n".join(lines)[-_LOG_CHARS:],
-        "localhost/yard-apply",
-        "-c",
-        'printf "%s\\n" "$YARD_LOG"; exit 1',
-    ]
-    try:
-        await _podman(config).stream(*argv)
-    except Exception as exc:
-        log.warning("deploy record %s: %s", app, exc)
+async def start(
+    config: Config, app: str, command: str, project: Project | None, *, labels: dict[str, str], log: list[str]
+) -> int:
+    """Start `deploy-<name>` detached: `up`, `purge`, or `fail` (print the log, exit 1).
 
-
-async def _remove_record(config: Config, app: str) -> None:
-    """Remove the last deploy container. Without -f, Podman refuses a running one: a running deploy
-    container is the deploy lock, and the `run` after this then fails on the name."""
-    await _podman(config).stream("rm", deploy_container(app))
-
-
-async def follow(config: Config, app: str, on_line: Callable[[str], None]) -> None:
-    """Stream the log of the deploy container from its first line until it stops."""
-    await _podman(config).stream("logs", "-f", deploy_container(app), on_line=on_line)
-
-
-def _record_args(app: str, labels: dict[str, str]) -> list[str]:
-    """The fixed name and the labels. The name makes `podman logs deploy-<name>` the last deploy.
-    `status.deploy_record` reads the labels back."""
-    args = ["--name", deploy_container(app)]
+    The container prints `log` first, so its own log is the whole deploy. Returns how many lines
+    of `log` it prints, so a follower can skip the ones it has.
+    """
+    podman = _podman(config)
+    # Without -f, Podman refuses a running container: a running deploy container is the deploy lock,
+    # and the `run` below then fails on the name.
+    await podman.stream("rm", deploy_container(app))
+    text = "\n".join(log)[-_LOG_CHARS:]
+    argv = ["run", "-d", "--name", deploy_container(app)]
     for key in sorted(labels):
-        args += ["--label", f"yard.{key}={labels[key]}"]
-    return args
+        argv += ["--label", f"yard.{key}={labels[key]}"]
+    argv += ["--network", "yard", "-v", f"{config.podman_socket}:/run/podman/podman.sock"]
+    argv += ["-v", f"{config.root}:{config.root}", "-e", f"YARD_LOG={text}"]
+    if project is not None:
+        argv += ["-e", f"COMPOSE_PROJECT_NAME={app}", "-e", f"COMPOSE_FILE={':'.join(project.files)}"]
+        argv += [arg for key in sorted(project.env) for arg in ("-e", f"{key}={project.env[key]}")]
+    await podman.run(*argv, "localhost/yard-apply", command, timeout=60)
+    return text.count("\n") + 1 if text else 0
+
+
+async def follow(config: Config, app: str, on_line: Callable[[str], None], *, skip: int = 0) -> None:
+    """Stream the log of the deploy container from its first line until it stops. The first `skip` lines stay out."""
+    seen = 0
+
+    def shown(line: str) -> None:
+        nonlocal seen
+        seen += 1
+        if seen > skip:
+            on_line(line)
+
+    await _podman(config).stream("logs", "-f", deploy_container(app), on_line=shown)
+
+
+async def wait(config: Config, app: str) -> int:
+    """The exit code of the deploy container, once it stops."""
+    code, text = await _podman(config).stream("wait", deploy_container(app))
+    try:
+        return int(text.strip().splitlines()[-1])
+    except ValueError, IndexError:
+        raise YardError(502, "podman", f"podman wait {deploy_container(app)}: {text.strip() or code}") from None
 
 
 async def build_apply(config: Config) -> tuple[int, str]:
