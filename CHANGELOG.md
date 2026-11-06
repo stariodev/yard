@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Yard writes a 0.12 app record with an image or a URL in `runs` in the 0.13 form when it starts. 0.13.0 read that record but did not write it. Thus 0.14 can drop the read, and a host that ran 0.13.1 once keeps its image and compose URL apps.
+
 ## 0.13.0
 
 ### Breaking

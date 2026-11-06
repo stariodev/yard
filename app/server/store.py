@@ -158,7 +158,12 @@ class Store:
         (root / "apps").mkdir(parents=True, exist_ok=True)
         tokens = root / "tokens"
         tokens.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return cls(root)
+        store = cls(root)
+        # A 0.12 record kept an image or a URL in runs. Write each one in the 0.13 form, so 0.14 can drop the read.
+        for app in store.list_apps():
+            if store._record(app.name).read_text() != _format(app):
+                store._write(app)
+        return store
 
     def _record(self, name: str) -> Path:
         return self.root / "apps" / name / "app"
@@ -325,16 +330,7 @@ class Store:
         return None
 
     def _write(self, app: App) -> None:
-        fields = (
-            ("repo", app.repo),
-            ("ref", app.ref),
-            ("runs", app.runs),
-            ("image", app.image),
-            ("compose_url", app.compose_url),
-            ("trigger", app.trigger),
-            ("created", app.created),
-        )
-        atomic_write(self._record(app.name), "".join(f"{key} {value}\n" for key, value in fields if value))
+        atomic_write(self._record(app.name), _format(app))
 
     def _env(self, name: str) -> Path:
         return self._record(name).with_name("env")
@@ -361,6 +357,19 @@ def _name_ok(name: str) -> bool:
     except YardError:
         return False
     return True
+
+
+def _format(app: App) -> str:
+    fields = (
+        ("repo", app.repo),
+        ("ref", app.ref),
+        ("runs", app.runs),
+        ("image", app.image),
+        ("compose_url", app.compose_url),
+        ("trigger", app.trigger),
+        ("created", app.created),
+    )
+    return "".join(f"{key} {value}\n" for key, value in fields if value)
 
 
 def _read_app(name: str, text: str) -> App:
