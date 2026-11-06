@@ -401,8 +401,16 @@ def test_doctor_warns_on_a_slow_healthcheck(tmp_path: Path):
     found = _run(_healthcheck_yard(tmp_path, HEALTH_SLOW))
     row = found["healthcheck heldso"]
     assert row["ok"] and row["warn"]
-    assert row["detail"].startswith("every 5m; Podman runs the first check one interval after start")
-    assert "use --interval=10s" in row["detail"]
+    assert row["detail"].startswith("every 5m; when the first check runs before the app is up")
+    assert "Use --interval=10s" in row["detail"]
+
+
+def test_doctor_accepts_a_slow_healthcheck_that_waits(tmp_path: Path):
+    """Yard's own check: it waits up to 60 s for the app, then runs once an hour."""
+    waiting = HEALTH_SLOW.replace('"Interval":300000000000', '"Interval":3600000000000,"Timeout":75000000000')
+    row = _run(_healthcheck_yard(tmp_path, waiting))["healthcheck heldso"]
+    assert row["ok"] and not row["warn"]
+    assert row["detail"] == "every 1h · starting"
 
 
 def test_doctor_fails_an_unhealthy_container(tmp_path: Path):

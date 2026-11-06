@@ -33,16 +33,34 @@ services:
       YARD_PODMAN_SOCK: ${YARD_PODMAN_SOCK}
       CONTAINER_HOST: unix:///run/podman/podman.sock
     # The deploy gate: `up --wait` waits for healthy, and a Yard that never answers reverts to the last image.
-    # Podman 5.7's compat API drops start_interval. The first check runs at start, before Yard answers,
-    # so the next check one interval later decides the deploy: the interval is the deploy wait.
-    # A static curl every 10 s is cheap; 0.3.0 dropped a Python probe every 2 s that took half the idle CPU.
-    # A failure in the first 60 s does not count toward the retries.
+    # Podman runs the first check at start and drops start_interval. Thus the first check waits itself:
+    # curl tries once a second until Yard answers, for 60 s at most. A deploy waits as long as Yard boots.
+    # One failed check marks Yard unhealthy, so a Yard that never answers fails the deploy after 60 s.
+    # The checks after the deploy only feed the status, so one an hour is enough.
+    # Podman splits each argument at spaces, so no argument has a space.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - -o
+        - /dev/null
+        - --retry
+        - "60"
+        - --retry-delay
+        - "1"
+        - --retry-max-time
+        - "60"
+        - --retry-connrefused
+        - --retry-all-errors
+        - --connect-timeout
+        - "2"
+        - --max-time
+        - "5"
+        - http://127.0.0.1:8000/health
+      interval: 1h
+      timeout: 75s
+      retries: 1
 
   caddy:
     image: docker.io/library/caddy:2
