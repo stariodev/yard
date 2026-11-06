@@ -573,17 +573,20 @@ async def test_events_merge_podman_and_yard(yard_journal):
     assert argv[argv.index("--since") + 1] == "-1h"
 
 
-def _deploy_event(event: str, code: str = "") -> str:
+def _deploy_event(event: str, code: str = "", *, v012: bool = False) -> str:
     """A Podman event of the apply container. Its labels are the deploy record."""
     labels = {
-        "yard.sha": "b3550ab" + "0" * 33,
+        "yard.revision": "b3550ab" + "0" * 33,
         "yard.image": "localhost/stario-site:b3550ab00000",
         "yard.runs": "yard:stario",
         "yard.kind": "containerfile",
         "yard.cause": "push",
         "yard.actor": "webhook:github",
-        "yard.previous": "localhost/stario-site:f5f6ab300000",
+        "yard.before.image": "localhost/stario-site:f5f6ab300000",
     }
+    if v012:
+        labels["yard.sha"] = labels.pop("yard.revision")
+        labels["yard.previous"] = labels.pop("yard.before.image")
     entry = {
         "__REALTIME_TIMESTAMP": MICROS,
         "SYSLOG_IDENTIFIER": "podman",
@@ -635,6 +638,15 @@ async def test_deploy_events_come_from_the_deploy_container(yard_journal):
     # The other events of the apply container stay Podman rows.
     res = await client.get("/api/v1/events?app=stario-site&source=podman", headers=auth(token))
     assert [row["event"] for row in res.json()] == ["start"]
+
+
+async def test_a_0_12_deploy_event_reads_sha_and_previous(yard_journal):
+    client, token, _argv, out = yard_journal
+    out.write_text("\n".join([_deploy_event("create", v012=True), _deploy_event("died", "3", v012=True)]) + "\n")
+    res = await client.get("/api/v1/events?app=stario-site&event=deploy.", headers=auth(token))
+    start, reverted = res.json()
+    assert start["sha"] == reverted["sha"] == "b3550ab" + "0" * 33
+    assert reverted["fields"]["error"] == "unhealthy; reverted to localhost/stario-site:f5f6ab300000"
 
 
 async def test_events_filters(yard_journal):

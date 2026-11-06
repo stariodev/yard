@@ -267,7 +267,8 @@ def _deploy_row(entry: dict, when: str, app: str, container: str, event: str, la
     The labels are the record, so these rows survive a Yard restart in the middle of a deploy.
     """
     given = {str(key)[5:]: str(value) for key, value in labels.items() if str(key).startswith("yard.") and value}
-    sha = given.get("sha", "")
+    sha = status.labels_plan(given).revision
+    previous = status.labels_plan(given, "before.").image
     if event == "create":
         name, state, message = "deploy.start", "", f"deploy {app} {sha[:12]}".rstrip()
         fields = {key: given.get(key, "") for key in ("image", "runs", "kind", "cause")}
@@ -275,9 +276,9 @@ def _deploy_row(entry: dict, when: str, app: str, container: str, event: str, la
         raw_code = str(entry.get("PODMAN_EXIT_CODE") or "0")
         code = int(raw_code) if raw_code.isdigit() else 1
         state = status.deploy_status(code)
-        error = given.get("error", "") or status.deploy_error(code, given.get("previous", ""))
+        error = given.get("error", "") or status.deploy_error(code, previous)
         name, message = "deploy.end", f"deploy {app} {state}"
-        fields = {"image": given.get("image", ""), "previous": given.get("previous", ""), "error": error}
+        fields = {"image": given.get("image", ""), "previous": previous, "error": error}
     row = {
         "time": when,
         "source": "yard",

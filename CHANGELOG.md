@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `yard events` shows the revision of a 0.13 deploy again, and a reverted deploy names the image it brought back. The deploy rows read only the 0.12 labels `sha` and `previous`, so on 0.13.0 and 0.13.1 they had no revision.
+
 ## 0.13.1
 
 - Yard writes a 0.12 app record with an image or a URL in `runs` in the 0.13 form when it starts. 0.13.0 read that record but did not write it. Thus 0.14 can drop the read, and a host that ran 0.13.1 once keeps its image and compose URL apps.
