@@ -162,6 +162,22 @@ def test_a_0_12_record_moves_runs_into_the_source(tmp_path: Path):
     assert store.app("umami").compose_url == "https://example.com/umami.yml"
 
 
+def test_the_store_writes_a_0_12_record_in_the_0_13_form_when_it_opens(tmp_path: Path):
+    Store.open(tmp_path)
+    for name, runs in (("db", "postgres:17"), ("umami", "https://example.com/umami.yml")):
+        (tmp_path / "apps" / name).mkdir(parents=True)
+        (tmp_path / "apps" / name / "app").write_text(f"repo \ntrigger push\ncreated t\nruns {runs}\n")
+    (tmp_path / "apps" / "heldso").mkdir(parents=True)
+    repo_app = "repo https://github.com/org/heldso\nref main\ntrigger push\ncreated t\n"
+    (tmp_path / "apps" / "heldso" / "app").write_text(repo_app)
+    Store.open(tmp_path)
+    assert (tmp_path / "apps" / "db" / "app").read_text() == "image postgres:17\ntrigger push\ncreated t\n"
+    umami = (tmp_path / "apps" / "umami" / "app").read_text()
+    assert umami == "compose_url https://example.com/umami.yml\ntrigger push\ncreated t\n"
+    # A 0.13 record stays as it is.
+    assert (tmp_path / "apps" / "heldso" / "app").read_text() == repo_app
+
+
 def test_repo_less_app_has_no_ref(tmp_path: Path):
     store = Store.open(tmp_path)
     app = store.create_app("db", image="postgres:17")
